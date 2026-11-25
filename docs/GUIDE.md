@@ -2,7 +2,7 @@
 
 Technical reference for reverse-engineering and modifying the menu firmware of a ModRetro M64 **that you own**. Use only the facts in this document. Do not invent offsets, CRC formulas, USB IDs, or flash commands. Do not crack or forge ModRetro's cryptographic signature. This repository does not ship firmware images or vendor key material.
 
-Offsets, CRC formulas, and the signature *scheme* below were verified against official stock firmware **1.26.4**. Packaging, mapping, a same-length menu-string edit, and custom images on two UI screens (the boot screen and the "No Cartridge Detected" screen, via appended LVGL images + Thumb code caves) have all been verified on a real 1.26.4 unit. For image/graphics mods, see [UI image mods](#ui-image-mods-verified-on-device).
+Offsets, CRC formulas, and the signature *scheme* below were verified against official stock firmware **1.26.4**. Packaging, mapping, a same-length menu-string edit, and custom images on two UI screens (the boot screen and the "No Cartridge Detected" screen, via appended LVGL images + Thumb code caves) have all been verified on a real 1.26.4 unit. For image/graphics mods, see [UI image mods](#ui-image-mods-verified-on-device). A larger add-on written in C (game library, per-game profiles, cover art from the SD card) has also been seen working on a real unit: see [Code add-ons in C](#code-add-ons-in-c-verified-on-device) and [`addon/`](../addon/README.md).
 
 ## Agent protocol (build, then flash)
 
@@ -226,6 +226,26 @@ Cave semantics: `push {r4,lr}; bl orig; ldr r0,[r4,#field]; bl lv_image_create; 
 - Descriptor field offsets (see above): check `data_size` at +12.
 - `dfu-util` prints `Error during download get_status` **after** `Submitting leave request...`. That is harmless: the MCU has already reset into the new firmware. The flash is good if `Download done.` / `File downloaded successfully` appeared before it.
 - After a modded image is installed, a fresh backup's first bytes match **the currently booted custom build**, not `mcu_stock.bin`. Compare against the last flashed `.bin` (its full length).
+
+---
+
+## Code add-ons in C (verified on device)
+
+For anything bigger than a cave, write C, compile it with `arm-none-eabi-gcc -mcpu=cortex-m7 -mthumb -Os -ffreestanding -fno-builtin`, link it at the first 4-aligned address after the raw image, and redirect existing `bl` instructions to it. Call firmware functions through absolute Thumb addresses (`((ret(*)(args))(addr|1))`). Allow no `.data` (assert it in the linker script). Test the compiled blob in Unicorn with Python models of the firmware calls before asking for a flash. The first add-on built this way is the game library in [`addon/`](../addon/README.md): library, per-game profiles and cover art. `addon/build.py` and `addon/emu_test.py` are the template for the build and the emulator test.
+
+Facts found for it (1.26.4):
+
+- **Cart header:** FPGA_Supervisor keeps the inserted cartridge's 64-byte ROM header at RAM `0x20006DCE`. It is read from FPGA PSRAM address 0 at `0x0800ADBC` while a cart is detected and zeroed on removal. The internal name is at +0x20.
+- **Settings store:** TLV records in an 8 KB EEPROM partition. `Settings_Read(tag, idx, buf, &len)` is `0x0801462C` and `Settings_Write(tag, idx, buf, len)` is `0x080146B0`. Both return 1 on success, and a write appends a missing record. Stock tags are 0x01-0x16 (0x04 StretchMode, 0x05 ScalarMode, 0x09 VideoProfile, 0x0C ProfileCfg[idx], 0x0D ImageSize, 0x10 OverclockLevel, 0x12 ExpansionPak, 0x13 Region, 0x14 LowLatency, 0x15 AdvDisplayCfg[idx]). Tag numbers are not validated, so an add-on can use its own (0x60 is taken by the library).
+- **Applying settings like the menu does:** the "set" callbacks take a `u32 *`: video profile `0x08011A64`, image size `0x08011C10`, stretch `0x08011BBC`. Overclock: Cpak flush `0x0801C1EC` -> apply level `0x08011DCC` -> settle check `0x0800882C(u8 *passed)` -> store `0x08013186` -> post event 0x0F (`0x08004BE4`). Getters: `0x0801315A` OC, `0x08012FD4` profile, `0x080130AC` image size, `0x08012EA4` stretch. `FPGA_IsOperational` is `0x0800AEC8`.
+- **Running code every UI frame:** the overlay thread loop at `0x080142A0` does lock -> `bl lv_timer_handler` (`0x080142A8`) -> unlock -> sleep. Wrapping that `bl` gives a tick in the LVGL thread, inside the render lock. `tx_time_get` is `0x0807E264` (1 tick = 1 ms).
+- **Free RAM:** AXI SRAM `0x240EF130`-`0x240FFFFF` is past the stock `.bss` and unreferenced. It is not zeroed at reset: hook `bl __libc_init_array` at `0x08014FAE` to clear what you use. The gap after the DTCM `.bss` (`0x2001C818`-`0x20020000`) is in use, so do not touch it.
+- **UI key codes:** 0x81 A, 0x82 B, 0x83 Z, 0x84 L, 0x85 R, 0x86 START, 0x87-0x8A d-pad U/D/L/R, 0x8B-0x8E C U/D/L/R, 0x8F/0x90 encoder, 0x91 encoder press. A widget's key handler is at widget +0x20 and is called as `(key, widget)`.
+- **Focus links:** widget +0x08 up, +0x0C down, +0x10 left, +0x14 right, +0x18 prev, +0x1C next (setter `0x080255D8`). A page records its first/last focusable widget at page-record +8/+0xC.
+- **Experimental page (PgExp):** create `0x0802510C`, state `0x200167D8`. Overclocking dropdown +0x5C, "Coming Soon" label +0xB4 (`bl MRW_Label_Create` at `0x0802521C`, text inline at cfg+0x29), feature table +0x10C (`bl MRW_Table_Create` at `0x0802526C`). `MRW_Table` cfg: +0x08 B-callback, +0x0C NULL-terminated string array (max 20), +0x10 width, +0x18 columns, +0x1C colour, +0x24 selected row. PgExp is the table's only stock user and never focuses it.
+- **SD card files (verified on device):** FatFs `f_open(FIL*, path, 1)` `0x08006314`, `f_read(FIL*, buf, n, &got)` `0x080064D0`, `f_close` `0x0800684A`; `FIL` is 0x228 bytes; paths are relative to the card root. FatFs has **no lock of its own** here. An add-on must hold the firmware's two file mutexes while it touches the card: FW_System `0x20008210` (M64.BIN verify/update) and FWSettings `0x200078C4` (CHANNEL.TXT), taken with `tx_mutex_get(mutex, 0)` `0x0807E6A0` (0 = got it) and released with `tx_mutex_put` `0x0807E6F4`. An unlocked read collided with the background M64.BIN check and made the console report "Corrupt M64.BIN". Only read when the mounted flag `0x2000C514` is set.
+- **Plain LVGL objects on a ModRetro page work:** `lv_image_create` `0x08050394` / `lv_image_set_src` `0x08050888` with an RGB565A8 descriptor in RAM, `lv_obj_align_to` `0x080371BC`, `lv_obj_update_flag(obj, flag, en)` `0x080349F0` (HIDDEN = 1), `lv_obj_is_valid` `0x08034A78`, `lv_obj_set_style_text_color` `0x08039934`.
+- **Event IDs** (name table `0x08099DFC`): 0x0B CartDetected, 0x0C CartNotDetected, 0x0F Cpak_Reload, 0x2D GameActive, 0x2E GameNotActive, 0x40 Overlay_Hide, 0x42 Overlay_ResetGame, 0x43 Overlay_ToggleMenu.
 
 ---
 
