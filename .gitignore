@@ -1,0 +1,30 @@
+# Firmware images, chip backups, option-byte dumps — never publish.
+# Official M64 firmware is copyrighted; this repo must not contain it.
+*.bin
+*.BIN
+*.dfu
+firmware/*.bin
+firmware/*.BIN
+
+# Local-only notes (if someone copies a private notes file into docs/)
+docs/*NOTES.md
+docs/*_NOTES.md
+
+# Keys — never commit private keys, including throwaway test keys
+*.pem
+*.key
+
+# This review document is a pre-publish artifact and may describe
+# scrubbed private details. Do not commit it.
+SECURITY_REVIEW.md
+
+# Python / OS junk
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+__pycache__/
+*.pyc
