@@ -28,3 +28,11 @@ desktop.ini
 
 __pycache__/
 *.pyc
+
+# Add-on build outputs and locally generated data
+addon/src/*.o
+addon/src/*.elf
+addon/src/*.map
+addon/src/symbols.json
+addon/tools/n64_codes.json
+COVERS/

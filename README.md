@@ -70,10 +70,11 @@ scripts\recover.bat
 | `scripts/` | Python helpers and Windows DFU wrappers (see below) |
 | `docs/GUIDE.md` | Hardware, container layout, CRCs, signature scheme, UI-image recipe, DFU, recovery, Route B |
 | `docs/FLASH_HOWTO.md` | Connect / backup / flash / recover, command by command |
+| `addon/` | Source of the **Game Library add-on** (library, per-game profiles, cover art), its build and emulator-test scripts, cover tools, and [install + flash instructions](addon/README.md) |
 | `skills/m64-firmware/` | Claude Code skill: when to trigger, and the build-verify-flash protocol |
 | `firmware/` | Local images only. Binaries are gitignored. |
 | `examples/` | Worked starting-point prompts for AI-assisted mods |
-| `CHEATSHEET.md` | One-page get-started reference |
+| `CHEATSHEET.md` | What is supported, how to use it on the console, and the get-started commands |
 | `LICENSE` | GPL-3.0 |
 
 ### Scripts
@@ -94,9 +95,20 @@ scripts\recover.bat
 | `recover.bat` | Reflash `firmware/mcu_stock.bin` |
 
 
+## Game Library add-on
+
+[`addon/`](addon/README.md) adds three things to the console's EXPERIMENTAL menu tab on firmware 1.26.4:
+
+- a **library** of the cartridges you have played (name, play count, most recent first, up to 20);
+- **per-game profiles**: Overclocking, video Profile, Image Size and Stretch are remembered per cartridge and re-applied when it starts;
+- **cover art** next to the selected game, read from `COVERS/<CODE>.BIN` on the SD card.
+
+It is C source compiled with the Arm GNU toolchain and appended to a raw slot-A image. Build, test, flash and cover
+instructions are in [`addon/README.md`](addon/README.md). What is and is not supported is in [`CHEATSHEET.md`](CHEATSHEET.md).
+
 ## Claude Code skill
 
-A ready-to-use Claude Code skill lives at [`skills/m64-firmware/SKILL.md`](skills/m64-firmware/SKILL.md). Copy that folder to `~/.claude/skills/m64-firmware/` (or your Claude Code skills directory). It triggers when you mention the M64, ModRetro, these `.bin` files, the boot or No-Cartridge screens, or flashing, and it tells the agent to follow the build-verify-then-flash protocol:
+A ready-to-use Claude Code skill lives at [`skills/m64-firmware/SKILL.md`](skills/m64-firmware/SKILL.md). Copy that folder to `~/.claude/skills/m64-firmware/` (or your Claude Code skills directory). It triggers when you mention the M64, ModRetro, these `.bin` files, the boot or No-Cartridge screens, the game library, per-game profiles, cover art, or flashing, and it tells the agent to follow the build-verify-then-flash protocol:
 
 1. Build and verify only, with no USB access.
 2. Report the file's SHA-256 and size.
