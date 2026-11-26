@@ -47,12 +47,18 @@ controller port 1 when its Pak Type (CONTROLLERS menu) is "Built-In CPak". The a
 
 ## Cover art
 
+Full how-to: [`docs/COVER_ART.md`](docs/COVER_ART.md). No reflash needed: covers are just files on the card.
+
 - Covers live on the SD card: **`COVERS/<CODE>.BIN`**. `<CODE>` is the cartridge's 4-character game code, e.g. `NSME`.
 - A game with no cover file shows the file name it wants in grey at the right of its row. That is how you learn its code.
 - Make one from any picture (PNG/JPG, any size):
   `python addon/tools/make_cover.py picture.png NSME --out E:\` (E: = the SD card)
 - Make a whole folder: name the pictures by code (`NSME.png`, `NKTE.jpg`) and run
   `python addon/tools/make_cover.py --dir my_covers --out E:\`
+- Convert a box-art collection you already have, matched to each code's region:
+  `python addon/tools/cartart_to_covers.py images.zip --out covers_out --sheet covers_out/sheet.png` (zip of `<Title> (U) Front.jpg` scans), or
+  `python addon/tools/boxfronts_to_covers.py box_fronts --out covers_out` (folder of `<Title> (USA).png`), then copy `covers_out/COVERS` to the card.
+  Both need `addon/tools/n64_codes.json` (next item).
 - Fill the card with plain title cards (coloured card + the game's name) for every known game code:
   `python addon/tools/codes_from_dat.py "Nintendo - Nintendo 64.dat" addon/tools/n64_codes.json` (once, from a game DAT you supply), then
   `python addon/tools/make_title_cards.py addon/tools/n64_codes.json --out E:\ --skip-existing`

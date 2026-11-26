@@ -7,7 +7,7 @@ description: Modify and DFU-flash the menu/overlay firmware of a ModRetro M64 ha
 
 This skill applies to a ModRetro M64 **that the user owns**. Everything verified so far lives in this toolkit.
 **Read `docs/GUIDE.md` before doing anything.** It has the agent protocol, container/CRC layout, the screen maps with every VA, the UI-image recipe, the C add-on method and firmware facts, DFU steps and recovery.
-`docs/FLASH_HOWTO.md` is the command-by-command flash runbook. `CHEATSHEET.md` says what is supported and how it is used on the console. `addon/README.md` covers the Game Library add-on end to end.
+`docs/FLASH_HOWTO.md` is the command-by-command flash runbook. `CHEATSHEET.md` says what is supported and how it is used on the console. `addon/README.md` covers the Game Library add-on end to end. `docs/COVER_ART.md` is the owner-facing how-to for cover art (one picture, a folder, a box-scan collection via `addon/tools/cartart_to_covers.py`, title cards).
 
 ## How the work should be run (non-negotiable)
 

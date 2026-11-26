@@ -70,6 +70,7 @@ scripts\recover.bat
 | `scripts/` | Python helpers and Windows DFU wrappers (see below) |
 | `docs/GUIDE.md` | Hardware, container layout, CRCs, signature scheme, UI-image recipe, DFU, recovery, Route B |
 | `docs/FLASH_HOWTO.md` | Connect / backup / flash / recover, command by command |
+| `docs/COVER_ART.md` | Adding cover art to the Game Library profiles: one picture, a folder, a box-art collection, title cards |
 | `docs/SAVE_STATES.md` | Why save states aren't possible from this toolkit, official status, related projects to watch |
 | `addon/` | Source of the **Game Library add-on** (library, per-game profiles, cover art, virtual Controller Paks), its build and emulator-test scripts, cover tools, and [install + flash instructions](addon/README.md) |
 | `skills/m64-firmware/` | Claude Code skill: when to trigger, and the build-verify-flash protocol |

@@ -36,3 +36,7 @@ addon/src/*.map
 addon/src/symbols.json
 addon/tools/n64_codes.json
 COVERS/
+
+# Converted covers and box scans: personal use, never publish
+covers_out/
+COVERS/

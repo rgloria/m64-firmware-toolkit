@@ -17,6 +17,8 @@ address it relies on are in [`../docs/GUIDE.md`](../docs/GUIDE.md#code-add-ons-i
 | `tools/make_cover.py` | Picture → `COVERS/<CODE>.BIN` for the SD card |
 | `tools/make_title_cards.py` | Plain title-card covers (coloured card + the game's name) for a table of game codes |
 | `tools/codes_from_dat.py` | Builds that table from a game DAT file you supply |
+| `tools/cartart_to_covers.py` | Covers for every code from a zip of box scans (`<Title> (<Region>) Front.jpg`), region-matched |
+| `tools/boxfronts_to_covers.py` | Covers for every code from a folder of box fronts named with No-Intro titles |
 
 ## 1. Install
 
@@ -87,6 +89,8 @@ DFU works even if the firmware does not boot. Stock firmware ignores the library
 
 ## 7. Cover art (optional)
 
+Step-by-step instructions, including whole box-art collections: [`../docs/COVER_ART.md`](../docs/COVER_ART.md).
+
 Covers are files on the console's SD card: `COVERS/<CODE>.BIN`, where `<CODE>` is the cartridge's 4-character game code.
 A game without a cover shows the file name it wants in grey next to its row.
 
@@ -95,6 +99,16 @@ python tools/make_cover.py picture.png NSME --out E:\            # one picture; 
 python tools/make_cover.py --dir my_covers --out E:\             # a folder of pictures named <CODE>.png / .jpg
 python tools/make_cover.py --decode E:\COVERS\NSME.BIN check.png # look at a converted file
 ```
+
+A box-art collection you already have (region-matched; codes without an image are left alone):
+
+```
+python tools/codes_from_dat.py "Nintendo - Nintendo 64.dat" tools/n64_codes.json
+python tools/cartart_to_covers.py images.zip --out covers_out --sheet covers_out/sheet.png   # zip of "<Title> (U) Front.jpg" scans
+python tools/boxfronts_to_covers.py box_fronts --out covers_out                             # folder of "<Title> (USA).png"
+```
+
+Look at the sheet, then copy `covers_out/COVERS` to the card. Fill the rest with title cards.
 
 Plain title cards for every game code in a table (no artwork needed):
 
