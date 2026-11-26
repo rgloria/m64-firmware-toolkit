@@ -172,7 +172,7 @@ These work on a **raw slot-A `.bin`** (VA = `0x08000000 + offset`, no `0x118` sh
 
 | Script | What it does |
 |---|---|
-| `rawdis.py` | `M64BIN=<file.bin> python scripts/rawdis.py str\|xref\|d\|dsc\|w ...` — like `m64dis.py` but VA-based, and it annotates `ldr pc` literals with their value, any string they point at, and any `lv_image_dsc_t` (`<dsc cf=.. WxH>`) |
+| `rawdis.py` | `M64BIN=<file.bin> python scripts/rawdis.py <cmd>`: VA-based inspector for a raw slot-A image. `str`, `xref`, `d` (annotates `ldr pc` literals with their value, string and `lv_image_dsc_t`), `dsc`, `w`, plus `callers <VA>...` (every BL/B.W to a function), `cli [filter]` (debug-shell command table: name, handler, help), `events` (event ID → name) and `ramrefs <lo> <hi>` (literals pointing into a RAM range) |
 | `make_lvgl_image.py` | PNG → LVGL 9 `lv_image_dsc_t` (28 B) + payload. Formats: I4, I8, A8, RGB565, RGB565A8, ARGB8888. `--data-va` fills in the data pointer |
 | `sprite_prep.py` | Cuts one frame out of a sprite sheet. It keys a flat light background (border flood fill), scales with premultiplied Lanczos, and can add a 1 px outline. Output is an RGBA PNG. Omit `--box` to use the whole image |
 | `screen_image.py` | `add`: appends a Thumb cave + descriptor + payload and redirects one `bl` in a screen's create function, adding a new image at (x, y). `resize`: changes the size/position/pixels of an image that `add` already placed. Both print a byte diff, cave disassembly and SHA-256, and assert that nothing else changed |
@@ -249,6 +249,50 @@ Facts found for it (1.26.4):
 - **SD writes:** FatFs `f_write(FIL*, buf, n, &done)` `0x08006632`, `f_sync` `0x080067BA` (called by `f_close`). Open modes are standard FatFs (`FA_READ` 1, `FA_WRITE` 2, `FA_CREATE_ALWAYS` 8, `FA_OPEN_ALWAYS` 0x10); the firmware itself writes files with mode 0x0B.
 - **Save states are not reachable from the MCU:** the N64 CPU/RSP/RDP state is inside the FPGA core, and the MCU's register/PSRAM interface exposes no CPU state and no pause. The stock "Coming Soon" list names "Save States"; it needs a new FPGA design.
 - **Event IDs** (name table `0x08099DFC`): 0x0B CartDetected, 0x0C CartNotDetected, 0x0F Cpak_Reload, 0x2D GameActive, 0x2E GameNotActive, 0x40 Overlay_Hide, 0x42 Overlay_ResetGame, 0x43 Overlay_ToggleMenu.
+
+---
+
+## Developing a new feature (method that worked)
+
+### 1. Decide whether the MCU can do it at all
+The menu firmware runs on the STM32 MCU. The N64 itself (CPU, RSP/RDP, cartridge bus, video) runs inside the FPGA core, and the
+MCU only reaches it through FPGA registers (`0x0800A8EC` read) and FPGA PSRAM (`0x080077B4` read, `0x0800A9F0` write).
+Anything that needs the running game's CPU or graphics state (save states, cheats that patch RAM mid-frame, rewind) is out of reach
+without a new FPGA design. The stock "Coming Soon" list on the Experimental page (`.data` table `0x20000508`: Virtual Controller Pak,
+Forced Progressive Mode, In-Game Notifications, Save States, ...) shows what ModRetro still plans. Some of those need FPGA work.
+Check this **before** writing code, and say plainly when something is not reachable instead of building a partial version.
+
+### 2. Map the stock code for the feature
+1. `rawdis.py cli <keyword>`: the debug-shell commands (cpak_*, fpga_*, sd_*, settings_*) are thin wrappers, so their handlers lead
+   straight to the core functions.
+2. `rawdis.py d <handler> 0x60`: note the functions each handler calls.
+3. `rawdis.py callers <function>`: who else calls it. These are the code paths and the threads it runs in.
+4. `rawdis.py events`: event IDs, then find `movs r0,#ID; bl 0x08004BE4` to see what posts an event.
+5. Log strings next to a call (`'%s: Game Reset'`, `'Controller Pak save failed'`) usually name the situation the code handles.
+
+### 3. Pick hook points
+- **Call-site hook:** replace one `bl X` with `bl my_func`; `my_func` calls `X` itself. Use it when only one caller should change.
+- **Function-entry hook:** replace the first 4 bytes of `X` with `b.w my_func`. That covers every caller (including the debug
+  shell). `my_func` returns straight to the caller. A naked trampoline re-runs the displaced instructions and jumps to `X+4`.
+  Only displace instructions that do not depend on the PC (`push`, `subs`, `uxtb`, `mov` are fine; `ldr rX,[pc,#..]`, `adr`,
+  branches and `it` blocks are not). Examples: `Settings_Write` `0x080146B0`, `Cpak_Load` `0x0801BF54`, `Cpak_Save` `0x0801C02C`.
+- Every hook asserts the exact bytes it replaces (`addon/build.py`), so a different firmware build fails loudly instead of being patched wrongly.
+
+### 4. Know the thread you run in
+UI tick (overlay thread, render lock held), Overseer (event handling, may block), the work-queue worker (`0x0801762C` posts to it;
+the pak autosave runs there, may block), reset (before the kernel). Never block in the UI tick. Take shared locks in one fixed order
+(file mutexes → pak mutex) and use bounded waits.
+
+### 5. Test before flashing
+Model every firmware call the new code makes in `addon/emu_test.py`. For an entry hook, model the stock body at `X+4` and have
+the model undo the displaced `push`. Assert the rules, not just the results: which locks are held during file access, that saves
+never wait, and that nothing is touched when a feature is off. This caught several bugs that would otherwise have cost a flash each.
+
+### 6. Plan the device test with the owner first
+Check that the owner has what exercises the new path *before* building it. A Controller Pak save needs a game that saves to a
+Controller Pak. Flashcart games keep the flashcart's header, so they do not exercise per-game paths. Without a UART adapter
+there is no shell for driving paths by hand; with one (Route B wiring, J15), commands like `cpak_write_note 1 1 TEST` then
+`cpak_eep_save 1` exercise the pak save without any game. Write down which half was seen on the device and which half is emulator-only.
 
 ---
 

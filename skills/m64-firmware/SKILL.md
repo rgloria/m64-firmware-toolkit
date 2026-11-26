@@ -32,7 +32,7 @@ python screen_image.py add    BASE.bin OUT.bin sprite.png --x X --y Y --hook <bl
 python screen_image.py resize BASE.bin OUT.bin sprite.png --x X --y Y --cave <cave VA>   # move/resize an existing one
 # Windows:  set M64BIN=OUT.bin & python rawdis.py d <VA> <n>
 # POSIX:    M64BIN=OUT.bin python rawdis.py d <VA> <n>
-# also: str / xref / dsc / w
+# also: str / xref / dsc / w / callers <VA> / cli [filter] / events / ramrefs <lo> <hi>
 ```
 
 - No-Cartridge screen: hook `0x0801FBD4`, orig `0x0803758C`, screen field +4. Free box x 0..109 / y 0..211. The icon is at y 103..135, the label at x 110..210 / y 148..160, the footer starts at y 212.
@@ -64,6 +64,21 @@ python addon/tools/make_cover.py picture.png NSME --out <SD root>
 - When something does not show on the console and the cause is not provable from the code, **add a status readout to the build** (the add-on writes one into the "Game Library" heading) instead of guessing. One flash then answers the question.
 - A widget's built-in callback may be bound to a different key than expected (the stock table's is **B**, not A). Decode the hint-icon table (`0x080AA8E4`, index = key − 0x81) to confirm key codes before using them.
 - The emulator test proves the add-on's logic, not the firmware around it. Say so when reporting.
+
+### How to approach a new feature request
+
+1. **Feasibility first.** If it needs the running N64's CPU/graphics state (save states, rewind, live RAM cheats), it lives in the FPGA core and is out of reach: say so with the evidence instead of building a partial version. The stock "Coming Soon" list (`0x20000508`) shows what ModRetro still plans.
+2. **Map it** with `rawdis.py cli <keyword>` → handler → `callers` → `events`. Follow the method in the guide's "Developing a new feature" section.
+3. **Agree the device test before building.** Ask whether the owner has what exercises the path (a game that saves to a Controller Pak, a card in the PC, a UART adapter). Flashcart games keep the flashcart's header.
+4. **Prefer function-entry hooks** for "replace this stock behaviour everywhere", with an opt-in switch (e.g. a folder on the SD card), and fall back to the stock code in every other case.
+5. **Report what was seen on the device and what is emulator-only, separately**, in the `*_CHANGES.md`, the PR and the reply.
+
+### Working with the owner during device tests
+
+- The owner can watch from a phone and send photos of the screen. Read them closely (heading text, row markers, status lines): they are the test result.
+- When the next step can only be done by the owner (enter DFU, play a game, move the SD card), say so once, plainly, and stop. Do not repeat the request each time you are prompted.
+- To pick up the SD card as soon as it is plugged in, run a background loop that waits for the drive letter, and require it to stay present for a few seconds, because ejecting makes the drive flicker. Keep the console's card contents unchanged apart from the folders the feature uses (`COVERS`, `PAKS`).
+- Write patch scripts to files and run them, instead of inlining code with backslashes into shell heredocs; some shells mangle `\\` and `\0`.
 
 ## Rules
 

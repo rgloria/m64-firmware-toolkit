@@ -83,7 +83,7 @@ scripts\recover.bat
 | Script | Purpose |
 |---|---|
 | `m64dis.py` | Find strings, literal-pool xrefs, and disassemble THUMB (container file offsets) |
-| `rawdis.py` | Same idea for a raw slot-A `.bin` (`M64BIN=<file.bin>`); VA-based, annotates image descriptors |
+| `rawdis.py` | Same idea for a raw slot-A `.bin` (`M64BIN=<file.bin>`); VA-based, annotates image descriptors; also lists a function's callers, the debug-shell command table, event names, and RAM references |
 | `make_lvgl_image.py` | Pack a PNG into an LVGL 9 `lv_image_dsc_t` + payload (for image/screen mods) |
 | `sprite_prep.py` | Cut a frame from a sprite sheet, key the background, scale, optional 1 px outline |
 | `screen_image.py` | Add (`add`) or move/resize (`resize`) an LVGL image on a screen in a raw slot-A `.bin` |
