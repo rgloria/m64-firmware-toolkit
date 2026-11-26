@@ -56,6 +56,22 @@ typedef unsigned int u32;
  * overlaps the verifier garbles both (seen on the device: no cover + "Corrupt M64.BIN"). */
 #define MTX_FW_SYSTEM ((void *)0x20008210)
 #define MTX_CFG_FILE ((void *)0x200078c4)
+#define f_write             FN(0x08006632, int, void *fil, const void *buf, u32 n, u32 *done)
+#define FA_READ 0x01
+#define FA_WRITE 0x02
+#define FA_OPEN_ALWAYS 0x10
+
+/* Built-in Controller Pak (stock 1.26.4): one 32 KB pak in EEPROM partition 0, copied into the FPGA's PSRAM
+ * region of port 1 by Cpak_Load and written back page by page by Cpak_Save (autosave worker, flush on game
+ * reset / power off). PSRAM pak of port p = 0x20E00000 + (p-1)*0x8000. */
+#define PSRAM_Read          FN(0x080077b4, int, u32 addr, u32 len, void *buf)        /* 1 = ok */
+#define PSRAM_Write         FN(0x0800a9f0, int, u32 addr, u32 len, const void *buf)  /* nonzero = ok */
+#define Pak_IdBlockValid    FN(0x0801b9c8, int, const void *first256)
+#define MTX_CPAK ((void *)0x20010d60)
+#define PAK_LOADED_MASK (*(volatile u8 *)0x20010d94)   /* bit p = port p's pak is in PSRAM */
+#define PAK_PSRAM(port) (0x20e00000u + ((u32)(port) - 1u) * 0x8000u)
+#define PAK_SIZE 0x8000u
+#define PAK_CHUNK 512u
 
 #define LV_FLAG_HIDDEN 1
 #define LV_ALIGN_TOP_RIGHT 3
@@ -99,6 +115,7 @@ _Static_assert(sizeof(struct rec) == 40 && sizeof(struct defrec) == 8, "record l
 #define DEF_MAGIC 0x3146444du /* "MDF1" */
 
 enum { PH_BOOT, PH_WAIT, PH_LOAD, PH_RUN };
+enum { PK_SHARED, PK_GAME, PK_NEW, PK_BUSY, PK_ERR };   /* pak_state */
 enum { AP_NONE, AP_GAME, AP_DEF };
 
 static struct {
@@ -125,6 +142,13 @@ static struct {
     /* whole file: 8-byte header + pixels. 32-byte aligned so FatFs' direct multi-sector read lands on a
      * cache-line aligned address (the SD driver's requirements were not reverse-engineered). */
     u8 cv_raw[CV_BYTES + 8 + 24] __attribute__((aligned(32)));
+    /* virtual Controller Paks */
+    char pak_code[4];         /* game code whose PAKS/<code>.MPK is in port 1's PSRAM (0 = the shared built-in pak) */
+    u8 pak_state;             /* PK_* below, for the library row */
+    u8 pak_pad[3];
+    char pak_path[20];
+    u8 pak_fil[0x240];
+    u8 pak_buf[PAK_CHUNK] __attribute__((aligned(32)));
     const char *row_ptr[MAXG + 1];
     s8 row_map[MAXG];
     char rows[MAXG][ROWLEN];
@@ -411,6 +435,132 @@ u32 lib_timer_wrap(void)
     return r;
 }
 
+/* ------------------------------------------------------------------ virtual Controller Paks
+ * Opt-in: create a folder named PAKS in the SD card root. Then, for a cartridge with a game code, port 1's
+ * built-in pak is PAKS/<CODE>.MPK (32,768 bytes, the usual raw .mpk format) instead of the one shared pak in the
+ * console's EEPROM. A game with no file yet starts from a copy of the shared pak; the file is created on its first
+ * save. Without the folder, without a card, or for a cartridge without a code, the stock shared pak is used and
+ * the EEPROM is used exactly as before. The shared EEPROM pak is never written while a per-game pak is loaded. */
+__attribute__((naked)) static int stock_pak_load(__attribute__((unused)) u32 port)
+{
+    __asm__("subs r3, r0, #1\n"                 /* the two instructions displaced at 0x0801bf54 */
+            "uxtb r3, r3\n"
+            "ldr r12, =0x0801bf59\n"
+            "bx r12\n"
+            ".ltorg\n");
+}
+
+__attribute__((naked)) static int stock_pak_save(__attribute__((unused)) u32 port)
+{
+    __asm__("push.w {r0, r1, r2, r4, r5, r6, r7, r8, r9, r10, r11, lr}\n"   /* displaced at 0x0801c02c */
+            "ldr r12, =0x0801c031\n"
+            "bx r12\n"
+            ".ltorg\n");
+}
+
+static int cart_code(char out[4])
+{
+    const volatile u8 *h = CART_HEADER;
+    if (h[0] != 0x80 || h[3] != 0x40) return 0;
+    for (int k = 0; k < 4; k++) {
+        u8 c = h[0x3b + k];
+        if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z'))) return 0;
+        out[k] = (char)c;
+    }
+    return 1;
+}
+
+static void pak_mkpath(const char code[4])
+{
+    char *o = put_s(S.pak_path, S.pak_path + sizeof S.pak_path - 1, "PAKS/");
+    o = put_n(o, S.pak_path + sizeof S.pak_path - 1, code, 4);
+    o = put_s(o, S.pak_path + sizeof S.pak_path - 1, ".MPK");
+    *o = 0;
+}
+
+/* both firmware file mutexes; 1 = got them. wait = ticks (ms). Saves never wait (the autosave retries);
+ * the load waits a little, because at power-on the firmware may be busy checking M64.BIN on the card
+ * exactly when the pak is loaded, and a game must not silently get the shared pak for that reason. */
+static int sd_lock(u32 wait)
+{
+    if (!SD_MOUNTED || tx_mutex_get(MTX_FW_SYSTEM, wait)) return 0;
+    if (tx_mutex_get(MTX_CFG_FILE, wait)) { tx_mutex_put(MTX_FW_SYSTEM); return 0; }
+    return 1;
+}
+static void sd_unlock(void) { tx_mutex_put(MTX_CFG_FILE); tx_mutex_put(MTX_FW_SYSTEM); }
+
+/* H7: entry of Cpak_Load(port) 0x0801bf54 (b.w here; returns straight to the stock caller). */
+int lib_pak_load(u32 port)
+{
+    char code[4];
+    int r = stock_pak_load(port), e, ok;
+    u32 got;
+    if (port != 1) return r;
+    S.pak_code[0] = 0;
+    S.pak_state = PK_SHARED;
+    if (r != 0 || !cart_code(code)) return r;
+    if (!sd_lock(4000)) { S.pak_state = SD_MOUNTED ? PK_BUSY : PK_SHARED; return r; }
+    pak_mkpath(code);
+    e = f_open(S.pak_fil, S.pak_path, FA_READ);
+    if (e == 5) { sd_unlock(); return r; }                     /* FR_NO_PATH: no PAKS folder, feature off */
+    if (e == 4) {                                               /* FR_NO_FILE: new game, seeded from the shared pak */
+        cmem(S.pak_code, code, 4);
+        S.pak_state = PK_NEW;
+        sd_unlock();
+        return r;
+    }
+    if (e) { S.pak_state = PK_ERR; sd_unlock(); return r; }
+    ok = 0;
+    if (tx_mutex_get(MTX_CPAK, 2000) == 0) {
+        ok = 1;
+        for (u32 off = 0; off < PAK_SIZE && ok; off += PAK_CHUNK) {
+            got = 0;
+            if (f_read(S.pak_fil, S.pak_buf, PAK_CHUNK, &got) || got != PAK_CHUNK) ok = 0;
+            else if (!PSRAM_Write(PAK_PSRAM(1) + off, PAK_CHUNK, S.pak_buf)) ok = 0;
+        }
+        tx_mutex_put(MTX_CPAK);
+    }
+    f_close(S.pak_fil);
+    sd_unlock();
+    if (ok) {
+        cmem(S.pak_code, code, 4);
+        S.pak_state = PK_GAME;
+        return r;
+    }
+    S.pak_state = PK_ERR;                                       /* short / unreadable file: put the shared pak back */
+    return stock_pak_load(port);
+}
+
+/* H8: entry of Cpak_Save(port) 0x0801c02c (b.w here). Returns 0 = saved, negative = error (autosave retries). */
+int lib_pak_save(u32 port)
+{
+    int ok;
+    u32 done;
+    if (port != 1 || !S.pak_code[0]) return stock_pak_save(port);
+    if (!((PAK_LOADED_MASK >> 1) & 1)) return -127;            /* same check as stock: nothing loaded */
+    if (!sd_lock(0)) return -124;                               /* card busy or gone: keep the changes, retry later */
+    pak_mkpath(S.pak_code);
+    ok = 0;
+    if (tx_mutex_get(MTX_CPAK, 2000) == 0) {
+        /* stock refuses to save a pak whose ID block is invalid; do the same */
+        if (PSRAM_Read(PAK_PSRAM(1), 256, S.pak_buf) == 1 && Pak_IdBlockValid(S.pak_buf)
+            && f_open(S.pak_fil, S.pak_path, FA_WRITE | FA_OPEN_ALWAYS) == 0) {
+            ok = 1;
+            for (u32 off = 0; off < PAK_SIZE && ok; off += PAK_CHUNK) {
+                done = 0;
+                if (PSRAM_Read(PAK_PSRAM(1) + off, PAK_CHUNK, S.pak_buf) != 1) ok = 0;
+                else if (f_write(S.pak_fil, S.pak_buf, PAK_CHUNK, &done) || done != PAK_CHUNK) ok = 0;
+            }
+            if (f_close(S.pak_fil)) ok = 0;                     /* f_close flushes */
+        }
+        tx_mutex_put(MTX_CPAK);
+    }
+    sd_unlock();
+    if (!ok) { S.pak_state = PK_ERR; return -122; }
+    S.pak_state = PK_GAME;
+    return 0;
+}
+
 /* ------------------------------------------------------------------ UI: Experimental page */
 static void build_rows(void)
 {
@@ -436,6 +586,9 @@ static void build_rows(void)
         } else {
             o = put_s(o, end, "  (default)");
         }
+        if (g->code[0] && S.pak_code[0] && g->code[0] == S.pak_code[0] && g->code[1] == S.pak_code[1]
+            && g->code[2] == S.pak_code[2] && g->code[3] == S.pak_code[3])
+            o = put_s(o, end, "  [pak]");
         *o = 0;
         S.row_ptr[r] = S.rows[r];
         S.row_map[r] = (s8)order[r];
@@ -518,10 +671,10 @@ static void cover_tick(u32 now)
             else if (r == -101) set_status(S.recs[slot].code, "SD busy", -1);
             else set_status(S.recs[slot].code, "SD err ", -r);
         } else {
-            set_status(S.recs[slot].code, r ? "ok" : "no file", -1);
+            set_status(0, 0, -1);
         }
     } else if (slot >= 0) {
-        set_status(0, "no code", -1);
+        set_status(0, 0, -1);
     } else {
         set_status(0, 0, -1);
     }

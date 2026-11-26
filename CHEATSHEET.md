@@ -16,6 +16,7 @@ Everything marked Works has been seen running on a real unit.
 | Per-game profile on/off | press **A** on a library row | Works |
 | **Cover art** next to the selected library row | Menu → EXPERIMENTAL | Works |
 | Grey file-name hint when a game has no cover file | right of the row | Built and emulator-tested; not yet reported from a device |
+| **Virtual Controller Paks**: one 32 KB pak per game on the SD card (`PAKS/<CODE>.MPK`), for controller port 1's built-in pak | create a `PAKS` folder on the card; the game's row ends with `[pak]` | Loading confirmed on a real unit; saving to the card emulator-tested only (no Controller Pak game was available) |
 
 ## Using the Game Library
 
@@ -27,6 +28,19 @@ Everything marked Works has been seen running on a real unit.
 - To give a game its own settings: play it, change Overclocking / Profile / Image Size / Stretch in the normal menus. They are saved for that game automatically.
 - A cartridge seen for the first time starts from the **default profile** = whatever you set with no cartridge running (or while a game with its profile off is running).
 - Up to **20 games**. The 21st replaces the one played longest ago. "Erase Console Data" clears the library.
+
+## Virtual Controller Paks
+
+The stock 1.26.4 firmware has **one** built-in Controller Pak, shared by every game: 32 KB in the console's own memory, for
+controller port 1 when its Pak Type (CONTROLLERS menu) is "Built-In CPak". The add-on gives **each game its own pak** on the SD card.
+
+- Turn it on: create a folder named **`PAKS`** in the SD card root. Without it, the console uses the shared pak exactly as stock.
+- Each cartridge with a game code then uses **`PAKS/<CODE>.MPK`**: 32,768 bytes, the plain raw `.mpk` layout most N64 emulators use.
+- A game's first pak is a **copy of the shared pak**, so saves already on it stay visible. The file is written on the game's first Controller Pak save.
+- Saves follow the console's own timing: shortly after the game writes, and on Game Reset / power-off. The shared pak is never written while a game's own pak is loaded.
+- The library row of the game whose pak is loaded ends with **`[pak]`**.
+- To move a save to an emulator or another console, copy the `.MPK` file. To give a game a pak from elsewhere, put a 32 KB `.mpk` file named `<CODE>.MPK` in `PAKS`.
+- Falls back to the shared pak when: no `PAKS` folder, no card, a cartridge without a game code (flashcart menus), the card still busy after 4 s at power-on, or an unreadable/short file.
 
 ## Cover art
 
@@ -53,10 +67,14 @@ Everything marked Works has been seen running on a real unit.
 | Per-game Resolution, Low Latency, scaler mode, region, Expansion Pak | they can need a video-mode change or a game reset; they stay global |
 | Cover sizes other than 80×80 (pictures are scaled to fit inside it) | fixed buffer in the add-on |
 | Covers without an SD card | nothing is shown; the console retries every 10 s |
+| Virtual paks on controller ports 2–4 | the stock firmware only has a built-in pak for port 1; ports 2–4 use physical paks |
+| Several paks per game, or choosing a pak from a menu | one file per game code |
+| Per-game paks for flashcart games | the console sees the flashcart's header, so they share the stock pak |
+| Save states | the N64's CPU and graphics state live inside the FPGA core, out of reach of the menu firmware; ModRetro lists them as a future update |
 | Installing these mods through the official SD/OTA updater | the appended code does not fit in the `M64.BIN` container; DFU only |
 | Any firmware version other than 1.26.4 | every address is version-specific |
 
-Known cosmetic issue: a small `|` after the "Game Library" heading (the start of a status text that does not fit in the heading).
+The "Game Library" heading only shows status text when something is wrong (no SD, SD busy, SD error).
 
 ---
 
@@ -110,7 +128,7 @@ Teardown + serial adapter to J15 ("MCU DEBUG SIGNALS", Samtec FTSH-104-01-F-DV):
 ```bash
 python scripts/extract_slota.py M64.BIN firmware/mcu_stock.bin                     # raw 1.26.4 base
 python addon/build.py --base firmware/mcu_stock.bin --out firmware/mcu_library.bin  # needs arm-none-eabi-gcc (PATH, M64_GCC or --gcc-dir)
-python addon/emu_test.py                                                           # 52 checks, must end with ALL PASS
+python addon/emu_test.py                                                           # 72 checks, must end with ALL PASS
 scripts\backup.bat                                                                 # RDP 0xAA + full backup
 scripts\flash.bat firmware\mcu_library.bin
 ```
