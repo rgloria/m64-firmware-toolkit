@@ -66,6 +66,11 @@ python addon/tools/make_cover.py picture.png NSME --out <SD root>
 - The emulator test proves the add-on's logic, not the firmware around it. Say so when reporting.
 - **Device state the emulator assumes may not exist.** The first on-device pak save failed because the owner's built-in pak had never been formatted (no game ever used it), so the save was refused by the stock ID-block rule; the emulator's model pak was always formatted. Model the blank/default state of anything the feature reads (paks, settings, card folders), and make every failure path report *which* step failed (the add-on's heading shows `pak blank`, `pak open N`, ...). One status word saved a guessing flash.
 
+- **Backup check: compare slot A only up to the length of the image you think is installed.** DFU erases only the 8 KB sectors it writes, so bytes past the end of the current image can be leftovers of an older, longer build. That is harmless when they are unchanged since the previous backup and lie past the new image's end; check both, then flash.
+- **To test a path the firmware runs only on some event** (a pak save, a reload), bind a key on the add-on's own page to `Event_Post` of that stock event (`rawdis.py events` lists them) instead of waiting for a game to trigger it. Z → 0x0E `Cpak_FlushBuiltIn` proved the pak save on a console without a Controller Pak game.
+- **Check a saved `.MPK` on the PC:** 32,768 bytes; ID blocks at 0x20 / 0x60 / 0x80 / 0xC0, each with the checksum pair at +0x1C (sum of the first 14 big-endian halfwords, and 0xFFF2 − sum); inode table at 0x100 with an identical backup at 0x200 (pages 5–127 = `0x0003` when free); note table at 0x300. The stock format writes the label "The Future is Retro".
+- On Windows, PowerShell `Set-Content` rewrites a file with a BOM and CRLF, so `diff`/`patch` against the repo then fail. Edit with the Edit tool or a Python script that keeps the line endings, or normalise both sides before diffing. The repo uses `core.autocrlf`.
+
 ### How to approach a new feature request
 
 1. **Feasibility first.** If it needs the running N64's CPU/graphics state (save states, rewind, live RAM cheats), it lives in the FPGA core and is out of reach: say so with the evidence instead of building a partial version. The stock "Coming Soon" list (`0x20000508`) shows what ModRetro still plans.
@@ -80,6 +85,8 @@ python addon/tools/make_cover.py picture.png NSME --out <SD root>
 - When the next step can only be done by the owner (enter DFU, play a game, move the SD card), say so once, plainly, and stop. Do not repeat the request each time you are prompted.
 - To pick up the SD card as soon as it is plugged in, run a background loop that waits for the drive letter, and require it to stay present for a few seconds, because ejecting makes the drive flicker. Keep the console's card contents unchanged apart from the folders the feature uses (`COVERS`, `PAKS`).
 - Write patch scripts to files and run them, instead of inlining code with backslashes into shell heredocs; some shells mangle `\\` and `\0`.
+- Before starting a card watcher, check whether the card is **already** in the PC. A loop that only waits for the drive fires at once and reports the old contents. If it is in the PC, wait for it to be removed and then come back.
+- When the owner reports only a row marker (`[pak err]`), ask for the heading text too: the add-on puts the reason there. Owners often press a key several times and report only the end state, so record what they said, not the steps in between.
 
 ## Rules
 
