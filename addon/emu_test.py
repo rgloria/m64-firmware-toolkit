@@ -190,6 +190,8 @@ class Sim:
 
     def fwrite(self, fil, buf, n, done):
         assert self.fmode == 0x12
+        if getattr(self, "sd_full", False):                  # card full: FR_OK but fewer bytes written
+            self.u.mem_write(done, struct.pack("<I", 0)); return self.ret(0)
         d = bytes(self.u.mem_read(buf, n))
         cur = bytearray(self.sd[self.fpath])
         if len(cur) < self.fpos + n: cur += bytes(self.fpos + n - len(cur))
@@ -524,7 +526,7 @@ def main():
        and s3.eeprom_pak == shared1 and not [l for l in s3.log if l[0] == "stock_save"] and s3.held == [],
        "per-game save writes PAKS/NSME.MPK (32,768 bytes), shared EEPROM pak untouched")
     cfg, ctx, cb, rows = s3.table()
-    ok(rows[0].endswith("  [pak]"), f"library row marks the game whose pak is loaded: {rows[0]}")
+    ok(rows[0].endswith("  [pak ok]"), f"library row marks the game whose pak is loaded and saved: {rows[0]}")
     # power cycle: the game's own pak comes back
     s3.boot(); s3.paks_dir = True; s3.cart("SUPER MARIO 64", code=b"NSME", crc=1); s3.psram = {}
     ok(load() == 0 and s3.pak(1)[0x100:0x109] == b"MARIO-OWN" and s3.held == [], "after a power cycle the per-game pak is loaded from the SD card")
@@ -570,6 +572,66 @@ def main():
     s3.cart("MARIO KART 64", code=b"NKTE", crc=2); load(); s3.psram_put(0x20E00100, b"KART-LAST"); save()
     s3.cart("SUPER MARIO 64", code=b"NSME", crc=1); load()
     ok(s3.sd["PAKS/NKTE.MPK"][0x100:0x109] == b"KART-LAST" and s3.pak(1)[0x100:0x109] == b"MARIO-OWN", "save then reload switches files cleanly")
+    # 16. Z on the library row: save the pak now (posts the stock flush event 0x0E)
+    s5 = Sim()
+    for t_, n_ in ((0x10, 1), (0x09, 4), (0x0D, 4), (0x04, 1)): s5.store[(t_, 0)] = bytes(n_)
+    s5.run(6000); s5.paks_dir = True
+    s5.cart("SUPER MARIO 64", code=b"NSME", crc=1); s5.run(3000)
+    assert s5.call("lib_pak_load", 1) == 0
+    cfg, ctx, cb, rows = s5.table()
+    ok(rows[0].endswith("  [pak]"), f"pak loaded, not saved yet: {rows[0]}")
+    s5.log.clear(); assert s5.call("lib_table_key", 0x83, ctx) == ctx
+    ok(("event", 0x0E) in s5.log and "PAKS/NSME.MPK" not in s5.sd, "Z posts Cpak_FlushBuiltIn; the Overseer does the save")
+    assert s5.call("lib_pak_save", 1) == 0                       # what the Overseer runs for event 0x0E
+    s5.log.clear(); s5.run(500)
+    rows = s5.table()[3]
+    ok(s5.sd.get("PAKS/NSME.MPK") == s5.pak(1) and rows[0].endswith("  [pak ok]"), f"file written, row says saved: {rows[0]}")
+    s5.sd_write_fail = True; assert s5.call("lib_pak_save", 1) & 0x80000000; s5.sd_write_fail = False
+    rows = s5.table()[3]
+    ok(rows[0].endswith("  [pak err]"), f"failed save shows on the row: {rows[0]}")
+    s5.cart("SC64 bootloader", code=bytes(4), crc=9); s5.call("lib_pak_load", 1); s5.log.clear()
+    s5.call("lib_table_key", 0x83, ctx)
+    ok(("event", 0x0E) not in s5.log, "Z does nothing when no per-game pak is loaded")
+    # 17. library6: why a save failed (heading), and Z on a never-formatted pak formats it like the stock dialog
+    s6 = Sim()
+    for t_, n_ in ((0x10, 1), (0x09, 4), (0x0D, 4), (0x04, 1)): s6.store[(t_, 0)] = bytes(n_)
+    s6.eeprom_pak = bytes(0x8000)                                 # console's shared pak never formatted
+    s6.run(6000); s6.paks_dir = True
+    s6.cart("SUPER MARIO 64", code=b"NSME", crc=1); s6.run(3000)
+    assert s6.call("lib_pak_load", 1) == 0
+    cfg, ctx, cb, rows = s6.table(); s6.run(1000)
+    ok(rows[0].endswith("  [pak]") and s6.heading() == "Game Library", f"blank shared pak, loaded: {rows[0]} / {s6.heading()}")
+    s6.log.clear(); s6.call("lib_table_key", 0x83, ctx)
+    ev = [l[1] for l in s6.log if l[0] == "event"]
+    ok(ev == [0x0E], f"first Z only asks for a save: {ev}")
+    ok(s6.call("lib_pak_save", 1) & 0x80000000 and "PAKS/NSME.MPK" not in s6.sd and s6.held == [], "blank pak is not written (stock rule)")
+    s6.run(500)
+    ok(s6.heading() == "Game Library [pak blank]", f"heading says why while the page is open: {s6.heading()}")
+    rows = s6.table()[3]; s6.run(500)
+    ok(rows[0].endswith("  [pak err]") and s6.heading() == "Game Library [pak blank]", f"and again after reopening the page: {s6.heading()}")
+    s6.log.clear(); s6.call("lib_table_key", 0x83, ctx)
+    ev = [l[1] for l in s6.log if l[0] == "event"]
+    ok(ev == [0x0D, 0x0E], f"second Z on a blank pak: format then save, same events as the stock Format dialog: {ev}")
+    s6.psram_put(0x20E00000, make_pak(b"FORMATTED"))             # what Cpak_FormatBuiltIn(1) does to PSRAM
+    ok(s6.call("lib_pak_save", 1) == 0 and s6.sd.get("PAKS/NSME.MPK") == s6.pak(1) and s6.eeprom_pak == bytes(0x8000),
+       "formatted pak saved to PAKS/NSME.MPK; shared EEPROM pak untouched")
+    s6.run(500); rows = s6.table()[3]; s6.run(500)
+    ok(rows[0].endswith("  [pak ok]") and s6.heading() == "Game Library", f"after the save: {rows[0]} / {s6.heading()}")
+    # a game whose file exists but holds a blank pak: Z never formats over an existing file
+    s6.sd["PAKS/NSME.MPK"] = bytes(0x8000); assert s6.call("lib_pak_load", 1) == 0
+    s6.call("lib_pak_save", 1); s6.log.clear(); s6.call("lib_table_key", 0x83, ctx)
+    ev = [l[1] for l in s6.log if l[0] == "event"]
+    ok(ev == [0x0E], f"existing file: Z does not format it: {ev}")
+    # other reasons
+    s6.sd["PAKS/NSME.MPK"] = make_pak(b"GOOD"); s6.call("lib_pak_load", 1)
+    s6.sd_write_fail = True; s6.call("lib_pak_save", 1); s6.sd_write_fail = False; s6.run(500)
+    ok(s6.heading() == "Game Library [pak open 7]", f"open refused, with FRESULT: {s6.heading()}")
+    s6.sd_full = True; s6.call("lib_pak_save", 1); s6.sd_full = False; s6.run(500)
+    ok(s6.heading() == "Game Library [pak write 0]" and s6.held == [], f"short write (card full): {s6.heading()}")
+    s6.busy = {0x20008210}; s6.call("lib_pak_save", 1); s6.busy = set(); s6.run(500)
+    ok(s6.heading() == "Game Library [pak busy]" and s6.table()[3][0].endswith("  [pak err]"), f"card busy: {s6.heading()}")
+    ok(s6.call("lib_pak_save", 1) == 0, "retry succeeds"); s6.run(500)
+    ok(s6.heading() == "Game Library" and s6.table()[3][0].endswith("  [pak ok]"), f"heading clean again: {s6.heading()}")
     print("ALL PASS")
 
 

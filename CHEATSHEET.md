@@ -16,7 +16,7 @@ Everything marked Works has been seen running on a real unit.
 | Per-game profile on/off | press **A** on a library row | Works |
 | **Cover art** next to the selected library row | Menu → EXPERIMENTAL | Works |
 | Grey file-name hint when a game has no cover file | right of the row | Built and emulator-tested; not yet reported from a device |
-| **Virtual Controller Paks**: one 32 KB pak per game on the SD card (`PAKS/<CODE>.MPK`), for controller port 1's built-in pak | create a `PAKS` folder on the card; the game's row ends with `[pak]` | Loading confirmed on a real unit; saving to the card emulator-tested only (no Controller Pak game was available) |
+| **Virtual Controller Paks**: one 32 KB pak per game on the SD card (`PAKS/<CODE>.MPK`), for controller port 1's built-in pak | create a `PAKS` folder on the card; the game's row ends with `[pak]`; **Z** on the row saves now | Loading and saving confirmed on a real unit (save via Z; a game writing its own notes not yet seen on hardware) |
 
 ## Using the Game Library
 
@@ -38,7 +38,10 @@ controller port 1 when its Pak Type (CONTROLLERS menu) is "Built-In CPak". The a
 - Each cartridge with a game code then uses **`PAKS/<CODE>.MPK`**: 32,768 bytes, the plain raw `.mpk` layout most N64 emulators use.
 - A game's first pak is a **copy of the shared pak**, so saves already on it stay visible. The file is written on the game's first Controller Pak save.
 - Saves follow the console's own timing: shortly after the game writes, and on Game Reset / power-off. The shared pak is never written while a game's own pak is loaded.
-- The library row of the game whose pak is loaded ends with **`[pak]`**.
+- The library row of the game whose pak is loaded ends with **`[pak]`**, then **`[pak ok]`** once it was saved to the card this session, or **`[pak err]`** if the last save failed.
+- **Z** on the library list saves the running game's pak to the card right away (the same save the console does on Game Reset).
+- If a save fails, the heading says why: `Game Library [pak blank]` (the pak was never formatted), `[pak busy]` (card in use, it retries), `[pak open N]` / `[pak write N]` / `[pak close N]` (SD card error N; write 0 = card full).
+- **`pak blank`:** a console whose built-in pak was never used holds an unformatted pak, and an unformatted pak is never saved (the stock firmware has the same rule). For a game with no `.MPK` file yet, press **Z again**: the pak is formatted, exactly as the stock "Format Controller Pak" dialog does, and saved. A game would also offer to format it. The shared pak is not touched, and an existing `.MPK` file is never formatted by Z.
 - To move a save to an emulator or another console, copy the `.MPK` file. To give a game a pak from elsewhere, put a 32 KB `.mpk` file named `<CODE>.MPK` in `PAKS`.
 - Falls back to the shared pak when: no `PAKS` folder, no card, a cartridge without a game code (flashcart menus), the card still busy after 4 s at power-on, or an unreadable/short file.
 
@@ -128,7 +131,7 @@ Teardown + serial adapter to J15 ("MCU DEBUG SIGNALS", Samtec FTSH-104-01-F-DV):
 ```bash
 python scripts/extract_slota.py M64.BIN firmware/mcu_stock.bin                     # raw 1.26.4 base
 python addon/build.py --base firmware/mcu_stock.bin --out firmware/mcu_library.bin  # needs arm-none-eabi-gcc (PATH, M64_GCC or --gcc-dir)
-python addon/emu_test.py                                                           # 72 checks, must end with ALL PASS
+python addon/emu_test.py                                                           # 91 checks, must end with ALL PASS
 scripts\backup.bat                                                                 # RDP 0xAA + full backup
 scripts\flash.bat firmware\mcu_library.bin
 ```

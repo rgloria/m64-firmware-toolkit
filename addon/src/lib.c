@@ -82,6 +82,9 @@ typedef unsigned int u32;
 #define CV_MAGIC 0x4334364du  /* "M64C" */
 
 #define EV_CPAK_RELOAD 0x0f
+#define EV_CPAK_FLUSH 0x0e    /* Overseer: Cpak_Save(1) (dispatch table 0x08001FA0, case 0x080022D0) */
+#define EV_CPAK_FORMAT 0x0d   /* Overseer: Cpak_FormatBuiltIn(1) 0x0801BC6C (case 0x080022C8): formats port 1's pak in
+                               * PSRAM only (no EEPROM write). The stock "Format Controller Pak" dialog posts 0x0D then 0x0E. */
 #define SD_MOUNTED (*(const volatile u8 *)0x2000c514)   /* set by the firmware's SD_Mount (0x08014e14) */
 #define CART_HEADER ((const volatile u8 *)0x20006dce)  /* 64-byte N64 ROM header kept by FPGA_Supervisor */
 
@@ -116,6 +119,7 @@ _Static_assert(sizeof(struct rec) == 40 && sizeof(struct defrec) == 8, "record l
 
 enum { PH_BOOT, PH_WAIT, PH_LOAD, PH_RUN };
 enum { PK_SHARED, PK_GAME, PK_NEW, PK_BUSY, PK_ERR };   /* pak_state */
+enum { PW_NONE, PW_BLANK, PW_PSRAM, PW_BUSY, PW_OPEN, PW_WRITE, PW_CLOSE };   /* pak_why */
 enum { AP_NONE, AP_GAME, AP_DEF };
 
 static struct {
@@ -145,7 +149,13 @@ static struct {
     /* virtual Controller Paks */
     char pak_code[4];         /* game code whose PAKS/<code>.MPK is in port 1's PSRAM (0 = the shared built-in pak) */
     u8 pak_state;             /* PK_* below, for the library row */
-    u8 pak_pad[3];
+    u8 pak_saved;             /* a save to the card succeeded this session */
+    u8 pak_shown;             /* pak_state/pak_saved as last drawn in the table */
+    u8 pak_why;               /* PW_*: why the last per-game save failed (0 = it did not) */
+    u8 pak_fr;                /* FRESULT for PW_OPEN / PW_WRITE / PW_CLOSE */
+    u8 why_shown;             /* pak_why as last written into the heading */
+    u8 pak_nofile;            /* the per-game pak had no file on the card when it was loaded (seeded from the shared pak) */
+    u8 pak_pad;
     char pak_path[20];
     u8 pak_fil[0x240];
     u8 pak_buf[PAK_CHUNK] __attribute__((aligned(32)));
@@ -358,6 +368,8 @@ static void on_dirty(void)
 }
 
 static void cover_tick(u32 now);
+static void build_rows(void);
+static void status_clear(void);
 
 static void lib_tick(void)
 {
@@ -406,6 +418,12 @@ static void lib_tick(void)
 
     poll_cart(now);
     cover_tick(now);
+    if (S.cv_img && S.cv_tbl && (u8)(S.pak_state | (S.pak_saved << 4)) != S.pak_shown) {
+        S.pak_shown = (u8)(S.pak_state | (S.pak_saved << 4));
+        build_rows();
+        lv_obj_invalidate(S.cv_tbl);
+    }
+    if (S.cv_img && S.hd_cfg && S.pak_why != S.why_shown) status_clear();
 
     if (S.pending && now - S.t_game > 1500 && FPGA_IsOperational()) {
         struct prof want = (S.pending == AP_GAME && S.cur >= 0) ? S.recs[S.cur].p : S.def;
@@ -498,6 +516,9 @@ int lib_pak_load(u32 port)
     if (port != 1) return r;
     S.pak_code[0] = 0;
     S.pak_state = PK_SHARED;
+    S.pak_saved = 0;
+    S.pak_why = PW_NONE;
+    S.pak_nofile = 0;
     if (r != 0 || !cart_code(code)) return r;
     if (!sd_lock(4000)) { S.pak_state = SD_MOUNTED ? PK_BUSY : PK_SHARED; return r; }
     pak_mkpath(code);
@@ -506,6 +527,7 @@ int lib_pak_load(u32 port)
     if (e == 4) {                                               /* FR_NO_FILE: new game, seeded from the shared pak */
         cmem(S.pak_code, code, 4);
         S.pak_state = PK_NEW;
+        S.pak_nofile = 1;
         sd_unlock();
         return r;
     }
@@ -534,30 +556,34 @@ int lib_pak_load(u32 port)
 /* H8: entry of Cpak_Save(port) 0x0801c02c (b.w here). Returns 0 = saved, negative = error (autosave retries). */
 int lib_pak_save(u32 port)
 {
-    int ok;
+    int why = PW_BUSY, fr = 0, c;
     u32 done;
     if (port != 1 || !S.pak_code[0]) return stock_pak_save(port);
     if (!((PAK_LOADED_MASK >> 1) & 1)) return -127;            /* same check as stock: nothing loaded */
-    if (!sd_lock(0)) return -124;                               /* card busy or gone: keep the changes, retry later */
+    if (!sd_lock(0)) { S.pak_why = PW_BUSY; return -124; }     /* card busy or gone: keep the changes, retry later */
     pak_mkpath(S.pak_code);
-    ok = 0;
     if (tx_mutex_get(MTX_CPAK, 2000) == 0) {
-        /* stock refuses to save a pak whose ID block is invalid; do the same */
-        if (PSRAM_Read(PAK_PSRAM(1), 256, S.pak_buf) == 1 && Pak_IdBlockValid(S.pak_buf)
-            && f_open(S.pak_fil, S.pak_path, FA_WRITE | FA_OPEN_ALWAYS) == 0) {
-            ok = 1;
-            for (u32 off = 0; off < PAK_SIZE && ok; off += PAK_CHUNK) {
+        if (PSRAM_Read(PAK_PSRAM(1), 256, S.pak_buf) != 1) why = PW_PSRAM;
+        else if (!Pak_IdBlockValid(S.pak_buf)) why = PW_BLANK;  /* never formatted / corrupt: stock refuses too */
+        else if ((fr = f_open(S.pak_fil, S.pak_path, FA_WRITE | FA_OPEN_ALWAYS)) != 0) why = PW_OPEN;
+        else {
+            why = PW_NONE;
+            for (u32 off = 0; off < PAK_SIZE; off += PAK_CHUNK) {
                 done = 0;
-                if (PSRAM_Read(PAK_PSRAM(1) + off, PAK_CHUNK, S.pak_buf) != 1) ok = 0;
-                else if (f_write(S.pak_fil, S.pak_buf, PAK_CHUNK, &done) || done != PAK_CHUNK) ok = 0;
+                if (PSRAM_Read(PAK_PSRAM(1) + off, PAK_CHUNK, S.pak_buf) != 1) { why = PW_PSRAM; break; }
+                if ((fr = f_write(S.pak_fil, S.pak_buf, PAK_CHUNK, &done)) != 0 || done != PAK_CHUNK) { why = PW_WRITE; break; }
             }
-            if (f_close(S.pak_fil)) ok = 0;                     /* f_close flushes */
+            c = f_close(S.pak_fil);                             /* f_close flushes */
+            if (c && why == PW_NONE) { why = PW_CLOSE; fr = c; }
         }
         tx_mutex_put(MTX_CPAK);
     }
     sd_unlock();
-    if (!ok) { S.pak_state = PK_ERR; return -122; }
+    S.pak_why = (u8)why; S.pak_fr = (u8)fr;
+    if (why) { S.pak_state = PK_ERR; return -122; }
     S.pak_state = PK_GAME;
+    S.pak_nofile = 0;
+    S.pak_saved = 1;
     return 0;
 }
 
@@ -588,7 +614,7 @@ static void build_rows(void)
         }
         if (g->code[0] && S.pak_code[0] && g->code[0] == S.pak_code[0] && g->code[1] == S.pak_code[1]
             && g->code[2] == S.pak_code[2] && g->code[3] == S.pak_code[3])
-            o = put_s(o, end, "  [pak]");
+            o = put_s(o, end, S.pak_state == PK_ERR ? "  [pak err]" : S.pak_saved ? "  [pak ok]" : "  [pak]");
         *o = 0;
         S.row_ptr[r] = S.rows[r];
         S.row_map[r] = (s8)order[r];
@@ -624,6 +650,15 @@ static void set_status(const char *code, const char *word, int num)
     }
     *o = 0;
     if (lv_obj_is_valid(S.hd_ctx[0])) lv_obj_invalidate(S.hd_ctx[0]);
+}
+
+/* Heading with no cover problem: shows why the last pak save failed, else plain "Game Library". */
+static void status_clear(void)
+{
+    static const char *const words[] = { 0, "pak blank", "pak psram", "pak busy", "pak open ", "pak write ", "pak close " };
+    u32 w = S.pak_why < sizeof words / sizeof words[0] ? S.pak_why : 0;
+    set_status(0, words[w], (w >= PW_OPEN) ? S.pak_fr : -1);
+    S.why_shown = (u8)w;
 }
 
 static int cover_load(const char *path)
@@ -671,12 +706,10 @@ static void cover_tick(u32 now)
             else if (r == -101) set_status(S.recs[slot].code, "SD busy", -1);
             else set_status(S.recs[slot].code, "SD err ", -r);
         } else {
-            set_status(0, 0, -1);
+            status_clear();
         }
-    } else if (slot >= 0) {
-        set_status(0, 0, -1);
     } else {
-        set_status(0, 0, -1);
+        status_clear();
     }
     if (r == 1) {
         y = (int)sel * ROW_H - (CV_H - ROW_H) / 2;                  /* centred on the row, kept inside the table */
@@ -700,6 +733,16 @@ static void toggle_row(void **ctx);
 void *lib_table_key(u32 key, void **ctx)
 {
     if (key == 0x81 || key == 0x91) { toggle_row(ctx); return ctx; }
+    if (key == 0x83) {                          /* Z: save the running game's pak to the card now */
+        if (S.pak_code[0] && S.cur >= 0) {
+            /* Z again after "pak blank": format this game's pak first, the same two events the stock
+             * "Format Controller Pak" dialog posts. Only the PSRAM copy is formatted; the save then goes to
+             * PAKS/<CODE>.MPK, so the shared EEPROM pak is not touched. */
+            if (S.pak_why == PW_BLANK && S.pak_nofile) Event_Post(EV_CPAK_FORMAT);
+            Event_Post(EV_CPAK_FLUSH);
+        }
+        return ctx;
+    }
     return MRW_Table_Key(key, ctx);
 }
 
@@ -729,6 +772,7 @@ int lib_label_create(void **ctx, u8 *cfg)
     r = MRW_Label_Create(ctx, cfg);
     S.hd_cfg = (r == 1) ? cfg : 0;
     S.hd_ctx = ctx;
+    S.why_shown = 0xff;                          /* new heading: lib_tick writes the pak status into it */
     return r;
 }
 

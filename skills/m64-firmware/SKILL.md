@@ -45,7 +45,7 @@ python screen_image.py resize BASE.bin OUT.bin sprite.png --x X --y Y --cave <ca
 
 ```
 python addon/build.py --base BASE.bin --out OUT.bin     # arm-none-eabi-gcc via PATH, M64_GCC or --gcc-dir
-python addon/emu_test.py                                # 72 checks, must end with ALL PASS
+python addon/emu_test.py                                # 91 checks, must end with ALL PASS
 python addon/tools/make_cover.py picture.png NSME --out <SD root>
 ```
 
@@ -54,7 +54,7 @@ python addon/tools/make_cover.py picture.png NSME --out <SD root>
 - State lives in unused AXI SRAM at `0x240F0000` (not zeroed at reset: the reset hook clears it). Do not use the gap after the DTCM `.bss`; the firmware uses it.
 - Game records are in the settings EEPROM under tag `0x60`. Stock tags are `0x01`–`0x16`.
 - The cartridge's 64-byte ROM header is kept by the firmware at RAM `0x20006DCE` (name +0x20, game code +0x3B). It is already valid when the firmware loads the Controller Pak at power-on (seen on a real unit).
-- Virtual paks: `PAKS/<CODE>.MPK` (32 KB raw .mpk) replaces port 1's shared built-in pak, opt-in by the `PAKS` folder. To test the save path on a device you need a game that saves to a Controller Pak; flashcart games keep the bootloader header and always use the shared pak.
+- Virtual paks: `PAKS/<CODE>.MPK` (32 KB raw .mpk) replaces port 1's shared built-in pak, opt-in by the `PAKS` folder. Load and save are confirmed on a real unit. To test the save without a Controller Pak game: **Z** on the library row posts event 0x0E (the Game Reset flush); the row goes `[pak]` → `[pak ok]` and the file appears. Flashcart games keep the bootloader header and always use the shared pak.
 - **Save states cannot be done from the MCU** (CPU/RCP state is inside the FPGA core; no pause or state readout is exposed). Say so instead of building a partial version.
 - UI key codes: `0x81` A, `0x82` B, `0x87`–`0x8A` d-pad, `0x8F`/`0x90` encoder, `0x91` encoder press.
 
@@ -64,6 +64,7 @@ python addon/tools/make_cover.py picture.png NSME --out <SD root>
 - When something does not show on the console and the cause is not provable from the code, **add a status readout to the build** (the add-on writes one into the "Game Library" heading) instead of guessing. One flash then answers the question.
 - A widget's built-in callback may be bound to a different key than expected (the stock table's is **B**, not A). Decode the hint-icon table (`0x080AA8E4`, index = key − 0x81) to confirm key codes before using them.
 - The emulator test proves the add-on's logic, not the firmware around it. Say so when reporting.
+- **Device state the emulator assumes may not exist.** The first on-device pak save failed because the owner's built-in pak had never been formatted (no game ever used it), so the save was refused by the stock ID-block rule; the emulator's model pak was always formatted. Model the blank/default state of anything the feature reads (paks, settings, card folders), and make every failure path report *which* step failed (the add-on's heading shows `pak blank`, `pak open N`, ...). One status word saved a guessing flash.
 
 ## Rules
 
