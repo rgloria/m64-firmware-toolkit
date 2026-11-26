@@ -13,7 +13,7 @@ Never attempt to forge a signature under ModRetro's key.
 
 ## Quick start
 
-A one-page cheat sheet is in [`CHEATSHEET.md`](CHEATSHEET.md). Full technical reference: [`docs/GUIDE.md`](docs/GUIDE.md). Command-by-command flash runbook: [`docs/FLASH_HOWTO.md`](docs/FLASH_HOWTO.md).
+A one-page cheat sheet is in [`CHEATSHEET.md`](CHEATSHEET.md). Full technical reference: [`docs/GUIDE.md`](docs/GUIDE.md). Command-by-command flash runbook: [`docs/FLASH_HOWTO.md`](docs/FLASH_HOWTO.md). Save-state feasibility and related open-source projects are covered in [`docs/SAVE_STATES.md`](docs/SAVE_STATES.md).
 
 ### 1. Install Python deps
 
@@ -70,6 +70,7 @@ scripts\recover.bat
 | `scripts/` | Python helpers and Windows DFU wrappers (see below) |
 | `docs/GUIDE.md` | Hardware, container layout, CRCs, signature scheme, UI-image recipe, DFU, recovery, Route B |
 | `docs/FLASH_HOWTO.md` | Connect / backup / flash / recover, command by command |
+| `docs/SAVE_STATES.md` | Why save states aren't possible from this toolkit, official status, related projects to watch |
 | `addon/` | Source of the **Game Library add-on** (library, per-game profiles, cover art, virtual Controller Paks), its build and emulator-test scripts, cover tools, and [install + flash instructions](addon/README.md) |
 | `skills/m64-firmware/` | Claude Code skill: when to trigger, and the build-verify-flash protocol |
 | `firmware/` | Local images only. Binaries are gitignored. |
