@@ -1,6 +1,6 @@
 ---
 name: m64-firmware
-description: Modify and DFU-flash the menu/overlay firmware of a ModRetro M64 handheld that the user owns (STM32H7, LVGL 9 UI, firmware 1.26.4) - string edits, custom images/characters on UI screens (boot screen, "No Cartridge Detected" screen), Thumb code caves, C add-ons appended to the image (the Game Library add-on - played-cartridge library, per-game overclock/video profiles, cover art from the SD card), building a raw slot-A .bin, emulator-testing it, and flashing over USB DFU with dfu-util with RDP check, backup and rollback. Use when the user mentions the M64, ModRetro, M64.BIN, mcu_mod*.bin, the no-cartridge or boot screen, the game library, per-game profiles, cover art, putting a sprite/character on the M64, or flashing/recovering it.
+description: Modify and DFU-flash the menu/overlay firmware of a ModRetro M64 handheld that the user owns (STM32H7, LVGL 9 UI, firmware 1.26.4) - string edits, custom images/characters on UI screens (boot screen, "No Cartridge Detected" screen), Thumb code caves, C add-ons appended to the image (the Game Library add-on - played-cartridge library, per-game overclock/video profiles, cover art and per-game virtual Controller Paks on the SD card), building a raw slot-A .bin, emulator-testing it, and flashing over USB DFU with dfu-util with RDP check, backup and rollback. Use when the user mentions the M64, ModRetro, M64.BIN, mcu_mod*.bin, the no-cartridge or boot screen, the game library, per-game profiles, cover art, Controller Paks / memory paks / save files, save states, putting a sprite/character on the M64, or flashing/recovering it.
 ---
 
 # M64 firmware mods
@@ -45,15 +45,17 @@ python screen_image.py resize BASE.bin OUT.bin sprite.png --x X --y Y --cave <ca
 
 ```
 python addon/build.py --base BASE.bin --out OUT.bin     # arm-none-eabi-gcc via PATH, M64_GCC or --gcc-dir
-python addon/emu_test.py                                # 52 checks, must end with ALL PASS
+python addon/emu_test.py                                # 72 checks, must end with ALL PASS
 python addon/tools/make_cover.py picture.png NSME --out <SD root>
 ```
 
 - `BASE.bin` = stock 1.26.4 slot A, or stock + image mods. **Never** an image that already has the add-on: the build order is stock → image mods → add-on last. To change an image mod later, rebuild it and rerun `addon/build.py` on the result.
-- Six hooks, each asserted before patching: reset init `0x08014FAE`, overlay loop `0x080142A8`, `Settings_Write` `0x080146B0`, and three on the Experimental page (`0x0802521C`, `0x0802526C`, `0x0802501C`).
+- Eight hooks, each asserted before patching: reset init `0x08014FAE`, overlay loop `0x080142A8`, `Settings_Write` `0x080146B0`, three on the Experimental page (`0x0802521C`, `0x0802526C`, `0x0802501C`), and the entries of `Cpak_Load` `0x0801BF54` / `Cpak_Save` `0x0801C02C` for virtual paks.
 - State lives in unused AXI SRAM at `0x240F0000` (not zeroed at reset: the reset hook clears it). Do not use the gap after the DTCM `.bss`; the firmware uses it.
 - Game records are in the settings EEPROM under tag `0x60`. Stock tags are `0x01`–`0x16`.
-- The cartridge's 64-byte ROM header is kept by the firmware at RAM `0x20006DCE` (name +0x20, game code +0x3B).
+- The cartridge's 64-byte ROM header is kept by the firmware at RAM `0x20006DCE` (name +0x20, game code +0x3B). It is already valid when the firmware loads the Controller Pak at power-on (seen on a real unit).
+- Virtual paks: `PAKS/<CODE>.MPK` (32 KB raw .mpk) replaces port 1's shared built-in pak, opt-in by the `PAKS` folder. To test the save path on a device you need a game that saves to a Controller Pak; flashcart games keep the bootloader header and always use the shared pak.
+- **Save states cannot be done from the MCU** (CPU/RCP state is inside the FPGA core; no pause or state readout is exposed). Say so instead of building a partial version.
 - UI key codes: `0x81` A, `0x82` B, `0x87`–`0x8A` d-pad, `0x8F`/`0x90` encoder, `0x91` encoder press.
 
 ### Lessons that cost a flash each

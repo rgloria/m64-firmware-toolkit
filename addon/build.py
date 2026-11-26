@@ -1,4 +1,4 @@
-"""Build <base image> + the Game Library add-on (library, per-game profiles, cover art).
+"""Build <base image> + the Game Library add-on (library, per-game profiles, cover art, virtual Controller Paks).
 
   python build.py --base path/to/raw_slotA.bin --out path/to/output.bin [--gcc-dir <toolchain bin>]
 
@@ -44,6 +44,8 @@ HOOKS = [
     ("H4 PgExp: bl MRW_Label_Create",       0x0802521C, bl(0x0802521C, 0x0802C15C), "bl", "lib_label_create"),
     ("H5 PgExp: bl MRW_Table_Create",       0x0802526C, bl(0x0802526C, 0x0802F328), "bl", "lib_table_create"),
     ("H6 PgExp focus: strd r4,r4,[r5,#8]",  0x0802501C, bytes.fromhex("c5e90244"),  "bl", "lib_nav_tail"),
+    ("H7 Cpak_Load entry",                   0x0801BF54, bytes.fromhex("431edbb2"),  "b",  "lib_pak_load"),
+    ("H8 Cpak_Save entry",                   0x0801C02C, bytes.fromhex("2de9f74f"),  "b",  "lib_pak_save"),
 ]
 
 

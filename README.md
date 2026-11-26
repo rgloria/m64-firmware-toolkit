@@ -70,7 +70,7 @@ scripts\recover.bat
 | `scripts/` | Python helpers and Windows DFU wrappers (see below) |
 | `docs/GUIDE.md` | Hardware, container layout, CRCs, signature scheme, UI-image recipe, DFU, recovery, Route B |
 | `docs/FLASH_HOWTO.md` | Connect / backup / flash / recover, command by command |
-| `addon/` | Source of the **Game Library add-on** (library, per-game profiles, cover art), its build and emulator-test scripts, cover tools, and [install + flash instructions](addon/README.md) |
+| `addon/` | Source of the **Game Library add-on** (library, per-game profiles, cover art, virtual Controller Paks), its build and emulator-test scripts, cover tools, and [install + flash instructions](addon/README.md) |
 | `skills/m64-firmware/` | Claude Code skill: when to trigger, and the build-verify-flash protocol |
 | `firmware/` | Local images only. Binaries are gitignored. |
 | `examples/` | Worked starting-point prompts for AI-assisted mods |
@@ -101,7 +101,8 @@ scripts\recover.bat
 
 - a **library** of the cartridges you have played (name, play count, most recent first, up to 20);
 - **per-game profiles**: Overclocking, video Profile, Image Size and Stretch are remembered per cartridge and re-applied when it starts;
-- **cover art** next to the selected game, read from `COVERS/<CODE>.BIN` on the SD card.
+- **cover art** next to the selected game, read from `COVERS/<CODE>.BIN` on the SD card;
+- **virtual Controller Paks**: one 32 KB pak per game, `PAKS/<CODE>.MPK` on the SD card, instead of the one pak the console shares between all games.
 
 It is C source compiled with the Arm GNU toolchain and appended to a raw slot-A image. Build, test, flash and cover
 instructions are in [`addon/README.md`](addon/README.md). What is and is not supported is in [`CHEATSHEET.md`](CHEATSHEET.md).

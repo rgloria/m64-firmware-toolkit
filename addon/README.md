@@ -1,7 +1,7 @@
-# Game Library add-on (library, per-game profiles, cover art)
+# Game Library add-on (library, per-game profiles, cover art, virtual Controller Paks)
 
 A C add-on for ModRetro M64 MCU firmware **1.26.4**. It is compiled, appended to a raw slot-A image and wired in by
-redirecting six instructions of the stock firmware. Seen working on a real unit. Use it on a console you own, at your own risk.
+redirecting eight instructions of the stock firmware. Seen working on a real unit (the virtual pak *save* path is emulator-tested only). Use it on a console you own, at your own risk.
 
 What it does on the console is described in [`../CHEATSHEET.md`](../CHEATSHEET.md). How it works and every firmware
 address it relies on are in [`../docs/GUIDE.md`](../docs/GUIDE.md#code-add-ons-in-c-verified-on-device).
@@ -12,8 +12,8 @@ address it relies on are in [`../docs/GUIDE.md`](../docs/GUIDE.md#code-add-ons-i
 |---|---|
 | `src/lib.c` | The add-on. Firmware functions are called through absolute addresses listed at the top of the file |
 | `src/link.ld` | Linker script: code right after the base image, state in unused RAM at `0x240F0000` |
-| `build.py` | Compile, append, patch the six hooks (each checks the bytes it replaces), verify, print SHA-256 |
-| `emu_test.py` | Runs the compiled ARM code in Unicorn against Python models of the firmware calls (52 checks) |
+| `build.py` | Compile, append, patch the eight hooks (each checks the bytes it replaces), verify, print SHA-256 |
+| `emu_test.py` | Runs the compiled ARM code in Unicorn against Python models of the firmware calls (72 checks) |
 | `tools/make_cover.py` | Picture → `COVERS/<CODE>.BIN` for the SD card |
 | `tools/make_title_cards.py` | Plain title-card covers (coloured card + the game's name) for a table of game codes |
 | `tools/codes_from_dat.py` | Builds that table from a game DAT file you supply |
@@ -57,8 +57,8 @@ It never touches USB.
 python emu_test.py
 ```
 
-All 52 checks should print `PASS`, ending with `ALL PASS`. This proves the add-on's own logic (library, profiles,
-cover loading, SD locking). It does not prove the firmware around it.
+All 72 checks should print `PASS`, ending with `ALL PASS`. This proves the add-on's own logic (library, profiles,
+cover loading, virtual paks, SD locking). It does not prove the firmware around it.
 
 ## 5. Flash
 
@@ -107,10 +107,26 @@ No cover images or game database are included in this repository. Use pictures y
 
 File format: `"M64C"`, u16 80, u16 80, then an 80×80 RGB565 plane (little-endian) and an 80×80 alpha plane (19,208 bytes).
 
+## 8. Virtual Controller Paks (optional)
+
+Create a folder named `PAKS` in the SD card root. From then on, controller port 1's built-in pak (Pak Type "Built-In CPak")
+is `PAKS/<CODE>.MPK` for each cartridge with a game code, instead of the console's one shared pak.
+
+- A game's first pak starts as a copy of the shared pak; the file is created on its first Controller Pak save.
+- Files are plain 32,768-byte `.mpk` images (the format N64 emulators use). Copy them to back up or move saves.
+- The library row of the game whose pak is loaded ends with `[pak]`.
+- Remove the `PAKS` folder to go back to the shared pak. The `.MPK` files are left alone.
+
+How it works: the add-on takes over the entry of the firmware's `Cpak_Load` (`0x0801BF54`) and `Cpak_Save` (`0x0801C02C`).
+Load runs the stock load first, then overwrites port 1's PSRAM pak with the game's file. Save writes PSRAM to the file
+(after the same ID-block check the stock code does) instead of to the EEPROM. Ports 2–4 and any other case run the stock code.
+
 ## Changing the add-on
 
 - State must be zero-initialised (`link.ld` rejects initialised data). Constants are fine.
-- Any code that reads the SD card must hold the firmware's two file mutexes (`0x20008210` and `0x200078C4`, taken with
-  wait 0). FatFs in this firmware has no lock of its own; an unlocked read once made the console report "Corrupt M64.BIN".
+- Any code that touches the SD card must hold the firmware's two file mutexes (`0x20008210` and `0x200078C4`).
+  FatFs in this firmware has no lock of its own; an unlocked read once made the console report "Corrupt M64.BIN".
+  Take them with wait 0 from the UI thread and from saves (the autosave retries); the pak load waits up to 4 s, because at
+  power-on the firmware may be checking `M64.BIN` on the card. Lock order: file mutexes, then the pak mutex `0x20010D60`.
 - New firmware calls: add the address at the top of `lib.c`, add a model for it in `emu_test.py`, and add a check.
 - All addresses are for 1.26.4 only.

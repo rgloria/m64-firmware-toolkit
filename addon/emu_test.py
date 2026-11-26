@@ -15,6 +15,23 @@ HDR = 0x20006DCE
 STOP = 0x08000400                        # fake return address
 
 
+def pak_id_ok(b):
+    """N64 Controller Pak ID block checksum (offset 0x20..0x3F), as checked by the stock firmware"""
+    s = sum(struct.unpack_from(">H", b, 0x20 + 2 * i)[0] for i in range(14)) & 0xFFFF
+    a, c = struct.unpack_from(">HH", b, 0x3C)
+    return a == s and c == ((0xFFF2 - s) & 0xFFFF)
+
+
+def make_pak(tag: bytes) -> bytes:
+    p = bytearray(0x8000)
+    idb = bytearray(32); idb[0:len(tag)] = tag; idb[25] = 1      # arbitrary ID content
+    s = sum(struct.unpack_from(">H", idb, 2 * i)[0] for i in range(14)) & 0xFFFF
+    struct.pack_into(">HH", idb, 28, s, (0xFFF2 - s) & 0xFFFF)
+    p[0x20:0x40] = idb
+    p[0x100:0x100 + len(tag)] = tag                                # recognisable data
+    return bytes(p)
+
+
 class Sim:
     def __init__(self):
         self.store = {}                  # (tag, idx) -> bytes   (the settings EEPROM)
@@ -26,6 +43,11 @@ class Sim:
         self.objs = {}                   # live LVGL objects: handle -> dict(kind, hidden, ...)
         self.nobj = 0
         self.busy = set()                # firmware mutexes currently owned by another thread
+        self.mutex_waits = []
+        self.psram = {}                  # FPGA PSRAM (sparse)
+        self.eeprom_pak = make_pak(b"SHARED")
+        self.paks_dir = False
+        self.sd_write_fail = False
         self.held = []                   # ... owned by the add-on
         self.boot()
 
@@ -114,7 +136,13 @@ class Sim:
             0x080371BC: lambda: (self.objs[r0].__setitem__("align", (r1, r2, r3, struct.unpack("<i", u.mem_read(self.r(UC_ARM_REG_SP), 4))[0])), self.ret()),
             0x08006314: lambda: self.fopen(r0, r1, r2),
             0x080064D0: lambda: self.fread(r0, r1, r2, r3),
-            0x0800684A: lambda: (self.log.append(("f_close",)), self.ret(0)),
+            0x0800684A: lambda: self.fclose(),
+            0x08006632: lambda: self.fwrite(r0, r1, r2, r3),
+            0x080077B4: lambda: (u.mem_write(r2, bytes(self.psram_get(r0, r1))), self.ret(1)),
+            0x0800A9F0: lambda: (self.psram_put(r0, bytes(u.mem_read(r2, r1))), self.ret(1)),
+            0x0801B9C8: lambda: self.ret(1 if pak_id_ok(bytes(u.mem_read(r0, 0x40))) else 0),
+            0x0801BF58: lambda: self.stock_load(r0),
+            0x0801C030: lambda: self.stock_save(),
             0x0807E6A0: lambda: self.mget(r0, r1),
             0x0807E6F4: lambda: (self.held.remove(r0), self.ret(0)),
         }.get(addr)
@@ -131,24 +159,78 @@ class Sim:
         return h
 
     def mget(self, m, wait):
-        assert wait == 0 and m in (0x20008210, 0x200078C4), "cover code must never block on a firmware mutex"
+        if m == 0x20010D60:
+            assert 0 < wait <= 5000, "Controller Pak mutex: bounded wait expected"
+        else:
+            assert m in (0x20008210, 0x200078C4) and wait in (0, 4000), f"file mutex {m:#x} wait {wait}"
+            self.mutex_waits.append(wait)
         if m in self.busy: return self.ret(0x1D)            # TX_NOT_AVAILABLE
         self.held.append(m); self.ret(0)
 
     def fopen(self, fil, path, mode):
-        assert self.held == [0x20008210, 0x200078C4], "file access without both firmware mutexes"
+        assert self.held[:2] == [0x20008210, 0x200078C4], "file access without both firmware mutexes"
         p = bytes(self.u.mem_read(path, 32)).split(bytes(1))[0].decode()
-        self.log.append(("f_open", p))
-        assert mode == 1
+        self.log.append(("f_open", p, mode))
         if self.sd is None: return self.ret(3)              # FR_NOT_READY
-        if p not in self.sd: return self.ret(4)             # FR_NO_FILE
-        self.fdata, self.fpos = self.sd[p], 0
+        if p.startswith("PAKS/") and not self.paks_dir: return self.ret(5)   # FR_NO_PATH
+        self.fpath, self.fpos, self.fmode = p, 0, mode
+        if mode == 1:
+            if p not in self.sd: return self.ret(4)         # FR_NO_FILE
+        else:
+            assert mode == 0x12, f"unexpected open mode {mode:#x}"
+            if self.sd_write_fail: return self.ret(7)       # FR_DENIED
+            self.sd.setdefault(p, b"")
+        self.fdata = self.sd[p]
         self.ret(0)
 
     def fread(self, fil, buf, n, got):
         d = self.fdata[self.fpos:self.fpos + n]; self.fpos += len(d)
         self.u.mem_write(buf, d); self.u.mem_write(got, struct.pack("<I", len(d)))
         self.ret(0)
+
+    def fwrite(self, fil, buf, n, done):
+        assert self.fmode == 0x12
+        d = bytes(self.u.mem_read(buf, n))
+        cur = bytearray(self.sd[self.fpath])
+        if len(cur) < self.fpos + n: cur += bytes(self.fpos + n - len(cur))
+        cur[self.fpos:self.fpos + n] = d; self.fpos += n
+        self.sd[self.fpath] = bytes(cur)
+        self.u.mem_write(done, struct.pack("<I", n)); self.ret(0)
+
+    def fclose(self):
+        self.log.append(("f_close",)); self.ret(0)
+
+    # ---- Controller Pak models
+    def psram_get(self, addr, n):
+        return bytes(self.psram.get(addr + i, 0) for i in range(n))
+
+    def psram_put(self, addr, data):
+        for i, b in enumerate(data): self.psram[addr + i] = b
+
+    def pak(self, port):
+        return self.psram_get(0x20E00000 + (port - 1) * 0x8000, 0x8000)
+
+    def stock_load(self, port):
+        """body of the stock Cpak_Load after the two displaced instructions: shared EEPROM pak -> port PSRAM"""
+        self.log.append(("stock_load", port))
+        self.psram_put(0x20E00000 + (port - 1) * 0x8000, self.eeprom_pak)
+        m = self.u.mem_read(0x20010D94, 1)[0] | (1 << port)
+        self.u.mem_write(0x20010D94, bytes([m]))
+        self.ret(0)
+
+    def stock_save(self):
+        """body of the stock Cpak_Save after the displaced push.w {r0-r2,r4-r11,lr}: port PSRAM -> EEPROM"""
+        u = self.u
+        sp = self.r(UC_ARM_REG_SP)
+        regs = struct.unpack("<12I", u.mem_read(sp, 48))
+        port = regs[0]
+        self.log.append(("stock_save", port))
+        self.eeprom_pak = self.pak(port)
+        for reg, v in zip((UC_ARM_REG_R4, UC_ARM_REG_R5, UC_ARM_REG_R6, UC_ARM_REG_R7, UC_ARM_REG_R8,
+                           UC_ARM_REG_R9, UC_ARM_REG_R10, UC_ARM_REG_R11), regs[3:11]):
+            u.reg_write(reg, v)
+        u.reg_write(UC_ARM_REG_SP, sp + 48)
+        u.reg_write(UC_ARM_REG_R0, 0); u.reg_write(UC_ARM_REG_PC, regs[11] | 1)
 
     def heading(self):
         return bytes(self.u.mem_read(self.hcfg + 0x29, 35)).split(bytes(1))[0].decode()
@@ -360,9 +442,9 @@ def main():
     s2.cart(None); s2.run(700); s2.cart("MARIO KART 64", code=b"NKTE", crc=2); s2.run(3000)
     cfg, ctx, cb, rows = s2.table(); s2.log.clear(); s2.run(1000)
     img, lbl = s2.cover_objs()
-    ok(("f_open", "COVERS/NKTE.BIN") in s2.log and img["hidden"] and not lbl["hidden"] and lbl["text"] == "COVERS/NKTE.BIN"
+    ok(("f_open", "COVERS/NKTE.BIN", 1) in s2.log and img["hidden"] and not lbl["hidden"] and lbl["text"] == "COVERS/NKTE.BIN"
        and lbl["align"] == (0xCAFE0000, 3, 0, 2), f"no cover file: label names the file ({lbl.get('text')})")
-    ok(s2.heading() == "Game Library [NKTE no file]", f"heading status: {s2.heading()}")
+    ok(s2.heading() == "Game Library", f"heading stays clean when a cover is simply missing: {s2.heading()}")
     n_open = opens(s2); s2.run(3000)
     ok(opens(s2) == n_open == 1, "the SD card is read once per selection, not every tick")
     s2.sd["COVERS/NSME.BIN"] = cover((200, 30, 30)); s2.sd["COVERS/NKTE.BIN"] = cover((30, 30, 200))
@@ -372,7 +454,7 @@ def main():
     ok(not img["hidden"] and lbl["hidden"] and d[0] & 0xFFFF == 0x1419 and d[1] == 80 | (80 << 16) and d[2] == 160 and d[3] == 19200
        and pix == s2.sd["COVERS/NSME.BIN"][8:] and ("f_close",) in s2.log, "cover loaded into the image buffer and shown")
     ok(img["align"] == (0xCAFE0000, 3, 0, 0), f"cover kept inside a short table: {img['align']}")
-    ok(s2.heading() == "Game Library [NSME ok]", f"heading status: {s2.heading()}")
+    ok(s2.heading() == "Game Library", f"heading stays clean when the cover loads: {s2.heading()}")
     s2.select(cfg, 0)
     ok(bytes(s2.u.mem_read(img["src"][4], 19200)) == s2.sd["COVERS/NKTE.BIN"][8:], "moving the selection loads the other cover")
     s2.sd["COVERS/NSME.BIN"] = b"JUNK" + s2.sd["COVERS/NSME.BIN"][4:]
@@ -390,13 +472,14 @@ def main():
     s2.sd = {"COVERS/NKTE.BIN": cover((9, 9, 9))}; s2.run(7000)
     ok(not s2.cover_objs()[0]["hidden"], "retried after the back-off")
     ok(s2.held == [], "both firmware mutexes released after every read")
+    ok(s2.mutex_waits and set(s2.mutex_waits) == {0}, "cover reads never wait on a file mutex")
     # firmware busy with the card (e.g. verifying M64.BIN): no file access until it is done
     s2.select(cfg, 1, 300); s2.busy = {0x20008210}; s2.log.clear(); s2.run(4000)
     ok(opens(s2) == 0 and s2.heading().endswith("SD busy]") and s2.held == [], f"verifier holds its mutex: no SD access ({s2.heading()})")
     s2.busy = {0x200078C4}; s2.run(3000)
     ok(opens(s2) == 0 and s2.held == [], "config-file mutex busy: no SD access, first mutex given back")
     s2.busy = set(); s2.sd["COVERS/NSME.BIN"] = cover((5, 5, 5)); s2.run(2500)
-    ok(opens(s2) == 1 and s2.heading() == "Game Library [NSME ok]" and s2.held == [], "read happens once the firmware is done")
+    ok(opens(s2) == 1 and s2.heading() == "Game Library" and s2.held == [], "read happens once the firmware is done")
     s2.objs = {}; s2.log.clear(); s2.run(2000)
     ok(not [l for l in s2.log if l[0] in ("f_open", "set_src")], "page closed: no more SD or LVGL calls")
     # a record made by the first version (no game code) gets its code on the next play
@@ -407,7 +490,7 @@ def main():
     s2.cart(None); s2.run(700); s2.cart("HOMEBREW", code=bytes(4), crc=9); s2.run(3000)
     cfg, ctx, cb, rows = s2.table(); s2.log.clear(); s2.run(1000); img, lbl = s2.cover_objs()
     ok(opens(s2) == 0 and img["hidden"] and lbl["hidden"], "game without a valid code: no file access, nothing shown")
-    ok(s2.heading() == "Game Library [no code]", f"heading status: {s2.heading()}")
+    ok(s2.heading() == "Game Library", f"heading clean for a game without a code: {s2.heading()}")
     # 20-row table: the cover is centred on the row and clamped at the end
     for i in range(22):
         code = bytes([78, 71, 48 + i // 10, 48 + i % 10])                 # NG00 .. NG21
@@ -420,6 +503,73 @@ def main():
     rt = make_cover.decode(make_cover.encode(Image.new("RGB", (200, 100), (255, 128, 0))))
     ok(rt.getpixel((40, 40))[:3] == (255, 130, 0) and rt.getpixel((40, 5))[3] == 0 and rt.getpixel((40, 40))[3] == 255,
        "make_cover: letterboxed, transparent border, round-trips")
+    # 15. virtual Controller Paks
+    s3 = Sim()
+    for t_, n_ in ((0x10, 1), (0x09, 4), (0x0D, 4), (0x04, 1)): s3.store[(t_, 0)] = bytes(n_)
+    s3.run(6000)
+    load = lambda port=1: s3.call("lib_pak_load", port)
+    save = lambda port=1: s3.call("lib_pak_save", port) & 0xFFFFFFFF
+    neg = lambda v: v - (1 << 32) if v & 0x80000000 else v
+    shared0 = s3.eeprom_pak
+    s3.cart("SUPER MARIO 64", code=b"NSME", crc=1); s3.run(3000)
+    ok(load() == 0 and s3.pak(1) == shared0 and ("stock_load", 1) in s3.log and s3.held == [], "no PAKS folder: stock shared pak")
+    s3.psram_put(0x20E00100, b"MARIOSAVE"); s3.log.clear()
+    ok(save() == 0 and ("stock_save", 1) in s3.log and s3.eeprom_pak[0x100:0x109] == b"MARIOSAVE"
+       and not [k for k in s3.sd if k.startswith("PAKS/")], "no PAKS folder: saves go to the EEPROM as before")
+    shared1 = s3.eeprom_pak
+    s3.paks_dir = True; s3.log.clear()
+    ok(load() == 0 and s3.pak(1) == shared1 and "PAKS/NSME.MPK" not in s3.sd, "first time with PAKS: game starts from a copy of the shared pak")
+    s3.psram_put(0x20E00100, b"MARIO-OWN"); s3.log.clear()
+    ok(save() == 0 and s3.sd["PAKS/NSME.MPK"] == s3.pak(1) and len(s3.sd["PAKS/NSME.MPK"]) == 0x8000
+       and s3.eeprom_pak == shared1 and not [l for l in s3.log if l[0] == "stock_save"] and s3.held == [],
+       "per-game save writes PAKS/NSME.MPK (32,768 bytes), shared EEPROM pak untouched")
+    cfg, ctx, cb, rows = s3.table()
+    ok(rows[0].endswith("  [pak]"), f"library row marks the game whose pak is loaded: {rows[0]}")
+    # power cycle: the game's own pak comes back
+    s3.boot(); s3.paks_dir = True; s3.cart("SUPER MARIO 64", code=b"NSME", crc=1); s3.psram = {}
+    ok(load() == 0 and s3.pak(1)[0x100:0x109] == b"MARIO-OWN" and s3.held == [], "after a power cycle the per-game pak is loaded from the SD card")
+    # another game without a file: starts from the shared pak, not from Mario's
+    s3.cart("MARIO KART 64", code=b"NKTE", crc=2)
+    ok(load() == 0 and s3.pak(1) == shared1, "a second game starts from the shared pak, not another game's")
+    s3.psram_put(0x20E00100, b"KART-OWN!"); save()
+    ok(s3.sd["PAKS/NKTE.MPK"][0x100:0x109] == b"KART-OWN!" and s3.sd["PAKS/NSME.MPK"][0x100:0x109] == b"MARIO-OWN", "two games, two files")
+    # ports 2-4 are never touched
+    s3.log.clear()
+    ok(load(2) == 0 and save(2) == 0 and ("stock_load", 2) in s3.log and ("stock_save", 2) in s3.log, "ports 2-4: stock behaviour")
+    s3.cart("MARIO KART 64", code=b"NKTE", crc=2); load()
+    # SD busy while saving: error, nothing written, retry works
+    before = s3.sd["PAKS/NKTE.MPK"]; s3.psram_put(0x20E00100, b"KART-NEW!")
+    s3.busy = {0x20008210}; s3.mutex_waits = []
+    ok(neg(save()) < 0 and s3.sd["PAKS/NKTE.MPK"] == before and s3.held == [] and s3.mutex_waits == [0],
+       "card busy: save fails at once without writing (autosave retries)")
+    s3.busy = set()
+    ok(save() == 0 and s3.sd["PAKS/NKTE.MPK"][0x100:0x109] == b"KART-NEW!", "retry after the card is free succeeds")
+    # invalid ID block in PSRAM: refuse to save (same rule as stock)
+    good = s3.sd["PAKS/NKTE.MPK"]; s3.psram_put(0x20E00020, bytes(32))
+    ok(neg(save()) < 0 and s3.sd["PAKS/NKTE.MPK"] == good, "corrupt pak in memory is not written over the file")
+    # write failure
+    load(); s3.sd_write_fail = True
+    ok(neg(save()) < 0 and s3.held == [], "write failure reported, locks released"); s3.sd_write_fail = False
+    # truncated file: fall back to the shared pak
+    s3.sd["PAKS/NKTE.MPK"] = good[:10000]; s3.log.clear()
+    ok(load() == 0 and s3.pak(1) == shared1 and [l for l in s3.log if l[0] == "stock_load"] == [("stock_load", 1)] * 2,
+       "truncated file: shared pak put back")
+    s3.psram_put(0x20E00100, b"NOSAVEME!"); s3.log.clear(); save()
+    ok(("stock_save", 1) in s3.log and s3.sd["PAKS/NKTE.MPK"] == good[:10000], "after a failed load, saves go to the shared pak (file left alone)")
+    s3.sd["PAKS/NKTE.MPK"] = good
+    # no SD card / card busy at load: shared pak
+    s3.u.mem_write(0x2000C514, bytes([0])); load()
+    ok(s3.pak(1) == s3.eeprom_pak, "no card mounted: shared pak"); s3.u.mem_write(0x2000C514, bytes([1]))
+    s3.mutex_waits = []; s3.busy = {0x200078C4}; load(); s3.busy = set()
+    ok(s3.pak(1) == s3.eeprom_pak and s3.held == [] and 4000 in s3.mutex_waits, "card still busy after waiting 4 s at load: shared pak, locks released")
+    # cartridge without a valid code (flashcart menu): shared pak
+    s3.cart("SC64 bootloader", code=bytes(4), crc=9); load()
+    ok(s3.pak(1) == s3.eeprom_pak and not [l for l in s3.log if l[0] == "f_open" and l[1].startswith("PAKS/") and l[1][5:9] == "\0\0\0\0"],
+       "cartridge without a code: shared pak")
+    # game reset path: flush to the old game's file, then reload by the new header
+    s3.cart("MARIO KART 64", code=b"NKTE", crc=2); load(); s3.psram_put(0x20E00100, b"KART-LAST"); save()
+    s3.cart("SUPER MARIO 64", code=b"NSME", crc=1); load()
+    ok(s3.sd["PAKS/NKTE.MPK"][0x100:0x109] == b"KART-LAST" and s3.pak(1)[0x100:0x109] == b"MARIO-OWN", "save then reload switches files cleanly")
     print("ALL PASS")
 
 
